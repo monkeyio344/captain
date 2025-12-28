@@ -1,3 +1,4 @@
+use facet_kdl as kdl;
 use log::{Level, LevelFilter, Log, Metadata, Record, debug, error, warn};
 use owo_colors::{OwoColorize, Style};
 #[cfg(unix)]
@@ -311,113 +312,123 @@ fn check_edition_2024() {
 }
 
 
-/// Configuration read from `[workspace.metadata.captain]` in Cargo.toml
-#[derive(Debug)]
+/// Configuration read from `.config/captain/config.kdl`
+#[derive(Debug, facet::Facet)]
+#[facet(default)]
 struct CaptainConfig {
-    // Pre-commit jobs
-    generate_readmes: bool,
-    rustfmt: bool,
-    cargo_lock: bool,
-    arborium: bool,
-    rust_version: bool,
-    edition_2024: bool,
+    #[facet(kdl::child, default)]
+    pre_commit: PreCommitConfig,
 
-    // Pre-push checks
+    #[facet(kdl::child, default)]
+    pre_push: PrePushConfig,
+}
+
+#[derive(Debug, facet::Facet)]
+#[facet(default)]
+struct PreCommitConfig {
+    #[facet(kdl::property, default = true)]
+    generate_readmes: bool,
+    #[facet(kdl::property, default = true)]
+    rustfmt: bool,
+    #[facet(kdl::property, default = true)]
+    cargo_lock: bool,
+    #[facet(kdl::property, default = true)]
+    arborium: bool,
+    #[facet(kdl::property, default = true)]
+    rust_version: bool,
+    #[facet(kdl::property, default = true)]
+    edition_2024: bool,
+}
+
+#[derive(Debug, facet::Facet)]
+#[facet(default)]
+struct PrePushConfig {
+    #[facet(kdl::property, default = true)]
     clippy: bool,
     /// Features to use for clippy. If None, uses --all-features.
-    /// If Some(vec), uses --features with the specified features.
-    /// Use Some(vec![]) to run with no extra features.
-    clippy_features: Option<Vec<String>>,
+    #[facet(kdl::child, default)]
+    clippy_features: Option<FeatureList>,
+    #[facet(kdl::property, default = true)]
     nextest: bool,
+    #[facet(kdl::property, default = true)]
     doc_tests: bool,
     /// Features to use for doc tests. If None, uses --all-features.
-    doc_test_features: Option<Vec<String>>,
+    #[facet(kdl::child, default)]
+    doc_test_features: Option<FeatureList>,
+    #[facet(kdl::property, default = true)]
     docs: bool,
     /// Features to use for docs. If None, uses --all-features.
-    docs_features: Option<Vec<String>>,
+    #[facet(kdl::child, default)]
+    docs_features: Option<FeatureList>,
+    #[facet(kdl::property, default = true)]
     cargo_shear: bool,
 }
 
+#[derive(Debug, Default, facet::Facet)]
+#[facet(default)]
+struct FeatureList {
+    #[facet(kdl::arguments, default)]
+    features: Vec<String>,
+}
+
+fn get_config_path() -> PathBuf {
+    std::env::current_dir()
+        .unwrap()
+        .join(".config/captain/config.kdl")
+}
+
 fn load_captain_config() -> CaptainConfig {
-    let metadata = match cargo_metadata::MetadataCommand::new().exec() {
-        Ok(m) => m,
+    let config_path = get_config_path();
+
+    if !config_path.exists() {
+        debug!("No config file at {}, using defaults", config_path.display());
+        return CaptainConfig::default();
+    }
+
+    let content = match fs::read_to_string(&config_path) {
+        Ok(c) => c,
         Err(e) => {
-            debug!("Failed to load workspace metadata for config: {e}");
+            debug!("Failed to read config file: {e}");
             return CaptainConfig::default();
         }
     };
 
-    // Try [package.metadata.captain] first (more specific), then fall back to
-    // [workspace.metadata.captain]
-    let captain_cfg = metadata
-        .root_package()
-        .and_then(|p| p.metadata.get("captain"))
-        .or_else(|| metadata.workspace_metadata.get("captain"));
-
-    let captain_cfg = match captain_cfg {
-        Some(v) => v,
-        None => return CaptainConfig::default(),
-    };
-
-    let get_bool = |key: &str| -> Option<bool> { captain_cfg.get(key).and_then(|v| v.as_bool()) };
-
-    // Helper to parse feature config: array of strings, or false for no features
-    let parse_features = |key: &str| -> Option<Vec<String>> {
-        captain_cfg.get(key).and_then(|v| {
-            if let Some(arr) = v.as_array() {
-                Some(
-                    arr.iter()
-                        .filter_map(|item| item.as_str().map(String::from))
-                        .collect(),
-                )
-            } else if v.as_bool() == Some(false) {
-                // features = false means use no extra features (empty vec)
-                Some(vec![])
-            } else {
-                None
-            }
-        })
-    };
-
-    let clippy_features = parse_features("clippy-features");
-    let doc_test_features = parse_features("doc-test-features");
-    let docs_features = parse_features("docs-features");
-
-    CaptainConfig {
-        // Pre-commit jobs
-        generate_readmes: get_bool("generate-readmes").unwrap_or(true),
-        rustfmt: get_bool("rustfmt").unwrap_or(true),
-        cargo_lock: get_bool("cargo-lock").unwrap_or(true),
-        arborium: get_bool("arborium").unwrap_or(true),
-        rust_version: get_bool("rust-version").unwrap_or(true),
-        edition_2024: get_bool("edition-2024").unwrap_or(true),
-
-        // Pre-push checks
-        clippy: get_bool("clippy").unwrap_or(true),
-        clippy_features,
-        nextest: get_bool("nextest").unwrap_or(true),
-        doc_tests: get_bool("doc-tests").unwrap_or(true),
-        doc_test_features,
-        docs: get_bool("docs").unwrap_or(true),
-        docs_features,
-        cargo_shear: get_bool("cargo-shear").unwrap_or(true),
+    match facet_kdl::from_str(&content) {
+        Ok(config) => config,
+        Err(e) => {
+            error!("Failed to parse {}: {e}", config_path.display());
+            std::process::exit(1);
+        }
     }
 }
 
 impl Default for CaptainConfig {
     fn default() -> Self {
         Self {
-            // Pre-commit jobs
+            pre_commit: PreCommitConfig::default(),
+            pre_push: PrePushConfig::default(),
+        }
+    }
+}
+
+impl Default for PreCommitConfig {
+    fn default() -> Self {
+        Self {
             generate_readmes: true,
             rustfmt: true,
             cargo_lock: true,
             arborium: true,
             rust_version: true,
             edition_2024: true,
+        }
+    }
+}
 
-            // Pre-push checks
+impl Default for PrePushConfig {
+    fn default() -> Self {
+        Self {
             clippy: true,
-            clippy_features: None, // None means use --all-features
+            clippy_features: None,
             nextest: true,
             doc_tests: true,
             doc_test_features: None,
@@ -1427,17 +1438,17 @@ fn run_pre_push() {
         let mut skipped = Vec::new();
 
         if level >= 1 {
-            config.nextest = false;
-            config.doc_tests = false;
-            config.docs = false;
+            config.pre_push.nextest = false;
+            config.pre_push.doc_tests = false;
+            config.pre_push.docs = false;
             skipped.extend(["nextest", "doc-tests", "docs"]);
         }
         if level >= 2 {
-            config.clippy = false;
+            config.pre_push.clippy = false;
             skipped.push("clippy");
         }
         if level >= 3 {
-            config.cargo_shear = false;
+            config.pre_push.cargo_shear = false;
             skipped.push("cargo-shear");
         }
 
@@ -1451,19 +1462,19 @@ fn run_pre_push() {
 
     // Show what's disabled via config (if anything)
     let mut config_disabled = Vec::new();
-    if !config.clippy {
+    if !config.pre_push.clippy {
         config_disabled.push("clippy");
     }
-    if !config.nextest {
+    if !config.pre_push.nextest {
         config_disabled.push("nextest");
     }
-    if !config.doc_tests {
+    if !config.pre_push.doc_tests {
         config_disabled.push("doc-tests");
     }
-    if !config.docs {
+    if !config.pre_push.docs {
         config_disabled.push("docs");
     }
-    if !config.cargo_shear {
+    if !config.pre_push.cargo_shear {
         config_disabled.push("cargo-shear");
     }
     if !config_disabled.is_empty() && std::env::var("HAVE_MERCY").is_err() {
@@ -1732,7 +1743,7 @@ fn run_pre_push() {
     );
 
     // 1. Run clippy FIRST - catches most issues quickly
-    if config.clippy {
+    if config.pre_push.clippy {
         print!(
             "  {} Running clippy for all affected crates... ",
             "🔍".cyan()
@@ -1746,13 +1757,13 @@ fn run_pre_push() {
         }
         clippy_command.push("--all-targets".to_string());
         // Use configured features, or --all-features if not specified
-        match &config.clippy_features {
+        match &config.pre_push.clippy_features {
             None => {
                 clippy_command.push("--all-features".to_string());
             }
-            Some(features) if !features.is_empty() => {
+            Some(features) if !features.features.is_empty() => {
                 clippy_command.push("--features".to_string());
-                clippy_command.push(features.join(","));
+                clippy_command.push(features.features.join(","));
             }
             Some(_) => {
                 // Empty features list means no extra features
@@ -1800,7 +1811,7 @@ fn run_pre_push() {
     }
 
     // 2. Build nextest tests
-    let test_handle: Option<std::thread::JoinHandle<CommandResult>> = if config.nextest {
+    let test_handle: Option<std::thread::JoinHandle<CommandResult>> = if config.pre_push.nextest {
         print!(
             "  {} Building tests for all affected crates... ",
             "🔨".cyan()
@@ -1871,7 +1882,7 @@ fn run_pre_push() {
     };
 
     // 3. Spawn cargo-shear in background (doesn't need cargo lock)
-    let shear_handle: Option<std::thread::JoinHandle<CommandResult>> = if config.cargo_shear {
+    let shear_handle: Option<std::thread::JoinHandle<CommandResult>> = if config.pre_push.cargo_shear {
         println!("  {} Running cargo-shear in background...", "✂️".cyan());
         let handle = std::thread::spawn(move || {
             let start = std::time::Instant::now();
@@ -1892,7 +1903,7 @@ fn run_pre_push() {
     };
 
     // 4. Run doc tests (while tests run in background)
-    if config.doc_tests {
+    if config.pre_push.doc_tests {
         print!(
             "  {} Running doc tests for all affected crates... ",
             "📚".cyan()
@@ -1906,13 +1917,13 @@ fn run_pre_push() {
             doctest_command.push(crate_name.to_string());
         }
         // Use configured features, or --all-features if not specified
-        match &config.doc_test_features {
+        match &config.pre_push.doc_test_features {
             None => {
                 doctest_command.push("--all-features".to_string());
             }
-            Some(features) if !features.is_empty() => {
+            Some(features) if !features.features.is_empty() => {
                 doctest_command.push("--features".to_string());
-                doctest_command.push(features.join(","));
+                doctest_command.push(features.features.join(","));
             }
             Some(_) => {
                 // Empty features list means no extra features
@@ -1946,7 +1957,7 @@ fn run_pre_push() {
     }
 
     // 5. Build docs (while tests run in background)
-    if config.docs {
+    if config.pre_push.docs {
         print!(
             "  {} Building docs for all affected crates... ",
             "📖".cyan()
@@ -1963,13 +1974,13 @@ fn run_pre_push() {
             doc_command.push(crate_name.to_string());
         }
         // Use configured features, or --all-features if not specified
-        match &config.docs_features {
+        match &config.pre_push.docs_features {
             None => {
                 doc_command.push("--all-features".to_string());
             }
-            Some(features) if !features.is_empty() => {
+            Some(features) if !features.features.is_empty() => {
                 doc_command.push("--features".to_string());
-                doc_command.push(features.join(","));
+                doc_command.push(features.features.join(","));
             }
             Some(_) => {
                 // Empty features list means no extra features
@@ -2358,17 +2369,50 @@ echo "All hooks installed successfully."
         println!("  {} Created .conductor/conductor.json", "✔".green());
     }
 
-    // 3. Create README templates directory with empty header/footer
+    // 3. Create .config/captain/ directory with config.kdl and templates
     println!();
-    let templates_dir = workspace_dir.join(".config/captain/readme-templates");
-    if !templates_dir.exists() {
-        if prompt_yes_no("Create .config/captain/readme-templates/ with empty header/footer?", true) {
-            fs::create_dir_all(&templates_dir).expect("Failed to create readme-templates directory");
+    let captain_dir = workspace_dir.join(".config/captain");
+    let config_path = captain_dir.join("config.kdl");
+    let templates_dir = captain_dir.join("readme-templates");
 
+    if !captain_dir.exists() {
+        if prompt_yes_no("Create .config/captain/ with config.kdl and readme templates?", true) {
+            fs::create_dir_all(&templates_dir).expect("Failed to create captain config directory");
+
+            // Create default config.kdl
+            let config_content = r#"// Captain configuration
+// All options default to true. Set to false to disable.
+
+pre-commit {
+    // generate-readmes false
+    // rustfmt false
+    // cargo-lock false
+    // arborium false
+    // rust-version false
+    // edition-2024 false
+}
+
+pre-push {
+    // clippy false
+    // nextest false
+    // doc-tests false
+    // docs false
+    // cargo-shear false
+
+    // Feature configuration (uncomment and customize as needed)
+    // clippy-features "feature1" "feature2"
+    // doc-test-features "feature1"
+    // docs-features "feature1"
+}
+"#;
+            fs::write(&config_path, config_content).expect("Failed to write config.kdl");
+            files_created.push(config_path);
+            println!("  {} Created .config/captain/config.kdl", "✔".green());
+
+            // Create empty header/footer templates
             let header_path = templates_dir.join("readme-header.md");
             let footer_path = templates_dir.join("readme-footer.md");
 
-            // Create empty templates (users can customize)
             fs::write(&header_path, "").expect("Failed to write readme-header.md");
             fs::write(&footer_path, "").expect("Failed to write readme-footer.md");
 
@@ -2386,7 +2430,7 @@ echo "All hooks installed successfully."
         }
     } else {
         println!(
-            "  {} .config/captain/readme-templates/ already exists, skipping",
+            "  {} .config/captain/ already exists, skipping",
             "ℹ".blue()
         );
     }
@@ -2543,11 +2587,11 @@ fn main() {
         }
     };
 
-    // Load captain config from [workspace.metadata.captain]
+    // Load captain config
     let config = load_captain_config();
 
     // Check edition 2024 requirement (bails if not met)
-    if config.edition_2024 {
+    if config.pre_commit.edition_2024 {
         check_edition_2024();
     }
 
@@ -2556,7 +2600,7 @@ fn main() {
 
     let mut handles = vec![];
 
-    if config.generate_readmes {
+    if config.pre_commit.generate_readmes {
         handles.push(std::thread::spawn({
             let sender = tx_job.clone();
             let template_dir = template_dir.clone();
@@ -2567,7 +2611,7 @@ fn main() {
         }));
     }
 
-    if config.rustfmt {
+    if config.pre_commit.rustfmt {
         handles.push(std::thread::spawn({
             let sender = tx_job.clone();
             move || {
@@ -2576,7 +2620,7 @@ fn main() {
         }));
     }
 
-    if config.cargo_lock {
+    if config.pre_commit.cargo_lock {
         handles.push(std::thread::spawn({
             let sender = tx_job.clone();
             move || {
@@ -2588,12 +2632,12 @@ fn main() {
     drop(tx_job);
 
     // Arborium setup and rust-version enforcement run synchronously before job processing to avoid concurrent TOML edits
-    let mut arborium_jobs = if config.arborium {
+    let mut arborium_jobs = if config.pre_commit.arborium {
         enqueue_arborium_jobs_sync()
     } else {
         Vec::new()
     };
-    let mut rust_version_jobs = if config.rust_version {
+    let mut rust_version_jobs = if config.pre_commit.rust_version {
         enforce_rust_version_sync()
     } else {
         Vec::new()

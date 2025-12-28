@@ -17,6 +17,8 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 [dependencies]
 cargo_metadata = "0.23.1"
 dirs = "6"
+facet = { git = "https://github.com/facet-rs/facet" }
+facet-kdl = { git = "https://github.com/facet-rs/facet" }
 fs-err = "3.2.0"
 log = { version = "0.4.29", features = ["std"] }
 owo-colors = "4.2.3"

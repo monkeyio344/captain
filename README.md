@@ -52,6 +52,7 @@ This interactively creates:
 - `hooks/` directory with pre-commit and pre-push hooks
 - `hooks/install.sh` to install the hooks
 - `.conductor/conductor.json` for VS Code task running (optional)
+- `.config/captain/config.kdl` configuration file
 - `.config/captain/readme-templates/` with empty header/footer templates
 - `README.md.in` template (if not present)
 
@@ -169,24 +170,40 @@ The hooks are installed to the main repo and all worktrees.
 
 ## Configuration
 
-captain can be configured via `[package.metadata.captain]` or `[workspace.metadata.captain]` in your `Cargo.toml`. Package metadata takes precedence over workspace metadata.
+Captain is configured via `.config/captain/config.kdl`:
 
-```toml
-# For single-crate projects:
-[package.metadata.captain]
-generate-readmes = false  # Disable README generation (default: true)
-clippy = false            # Disable clippy checks on pre-push
+```kdl
+// Captain configuration
+// All options default to true. Set properties to false to disable.
 
-# For workspaces (applies to all crates):
-[workspace.metadata.captain]
-generate-readmes = false
+pre-commit {
+    generate-readmes false
+    rustfmt false
+    cargo-lock false
+    arborium false
+    rust-version false
+    edition-2024 false
+}
+
+pre-push {
+    clippy false
+    nextest false
+    doc-tests false
+    docs false
+    cargo-shear false
+
+    // Feature configuration (for specific cargo commands)
+    clippy-features "feature1" "feature2"
+    doc-test-features "feature1"
+    docs-features "feature1"
+}
 ```
 
 ### Available Options
 
 All options default to `true`. Set to `false` to disable.
 
-#### Pre-commit Jobs
+#### Pre-commit Options (in `pre-commit { }` block)
 
 | Option | Description |
 |--------|-------------|
@@ -195,8 +212,9 @@ All options default to `true`. Set to `false` to disable.
 | `cargo-lock` | Stage `Cargo.lock` changes |
 | `arborium` | Set up arborium syntax highlighting for docs |
 | `rust-version` | Enforce consistent MSRV across crates |
+| `edition-2024` | Require Rust edition 2024 |
 
-#### Pre-push Checks
+#### Pre-push Options (in `pre-push { }` block)
 
 | Option | Description |
 |--------|-------------|
@@ -205,6 +223,9 @@ All options default to `true`. Set to `false` to disable.
 | `doc-tests` | Run documentation tests |
 | `docs` | Build documentation with warnings as errors |
 | `cargo-shear` | Check for unused dependencies |
+| `clippy-features` | Features to pass to clippy (child node with args) |
+| `doc-test-features` | Features to pass to doc tests (child node with args) |
+| `docs-features` | Features to pass to rustdoc (child node with args) |
 
 ## Notes
 

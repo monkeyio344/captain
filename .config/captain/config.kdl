@@ -1,0 +1,7 @@
+// Captain configuration for the captain project itself
+
+pre-commit {
+}
+
+pre-push {
+}
