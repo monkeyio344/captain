@@ -34,6 +34,20 @@ cargo install --git https://github.com/bearcove/captain
 
 ## Usage
 
+### Quick Start
+
+Initialize captain in your project:
+
+```bash
+captain init
+```
+
+This interactively creates:
+- `hooks/` directory with pre-commit and pre-push hooks
+- `hooks/install.sh` to install the hooks
+- `.conductor/conductor.json` for VS Code task running (optional)
+- `README.md.in` template (if not present)
+
 ### Basic Generation
 
 Run captain in your workspace root to generate/update all project files:
@@ -93,11 +107,11 @@ combines three parts:
 
 ### Custom Header and Footer
 
-To customize the README header and footer templates project-wide, create a `.captain-templates`
+To customize the README header and footer templates project-wide, create a `.config/captain/readme-templates`
 directory at your workspace root with custom templates:
 
 ```bash
-.captain-templates/
+.config/captain/readme-templates/
 ├── readme-header.md
 └── readme-footer.md
 ```
@@ -131,19 +145,19 @@ For `README.md.in` templates (main content):
 2. Crate's own `README.md.in` file (in the crate directory)
 3. Workspace-level `README.md.in` (for the workspace README)
 
-## Pre-commit Hook Setup
+## Git Hooks Setup
 
-captain includes a helper script to install git hooks for the repository and all
-worktrees. This is typically done automatically during initial setup, but you can
-run it manually:
+After running `captain init`, install the git hooks:
 
 ```bash
-./scripts/setup.sh
+./hooks/install.sh
 ```
 
 This installs hooks that:
 - **pre-commit**: Runs `captain` to auto-generate and stage files
 - **pre-push**: Runs `captain pre-push` for comprehensive validation
+
+The hooks are installed to the main repo and all worktrees.
 
 ## Configuration
 

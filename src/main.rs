@@ -310,54 +310,6 @@ fn check_edition_2024() {
     }
 }
 
-/// Get the git tree hash for a directory
-fn get_git_tree_hash(path: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", &format!("HEAD:{}", path.display())])
-        .output()
-        .ok()?;
-    if output.status.success() {
-        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    } else {
-        None
-    }
-}
-
-/// Cache file location: .git/captain-cache.json
-fn get_cache_path() -> Option<PathBuf> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--git-dir"])
-        .output()
-        .ok()?;
-    if output.status.success() {
-        let git_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        Some(PathBuf::from(git_dir).join("captain-cache.json"))
-    } else {
-        None
-    }
-}
-
-/// Load the check cache (crate_name -> tree_hash that passed)
-fn load_check_cache() -> std::collections::HashMap<String, String> {
-    let Some(cache_path) = get_cache_path() else {
-        return std::collections::HashMap::new();
-    };
-    let Ok(content) = fs::read_to_string(&cache_path) else {
-        return std::collections::HashMap::new();
-    };
-    serde_json::from_str(&content).unwrap_or_default()
-}
-
-/// Save the check cache
-#[allow(dead_code)]
-fn save_check_cache(cache: &std::collections::HashMap<String, String>) {
-    let Some(cache_path) = get_cache_path() else {
-        return;
-    };
-    if let Ok(content) = serde_json::to_string_pretty(cache) {
-        let _ = fs::write(&cache_path, content);
-    }
-}
 
 /// Configuration read from `[workspace.metadata.captain]` in Cargo.toml
 #[derive(Debug)]
@@ -492,12 +444,8 @@ fn enqueue_readme_jobs(
 
     let template_name = "README.md.in";
 
-    // Load custom header and footer from template directories if available
-    // Check .captain-templates/ first, then fall back to .config/captain/readme-templates/
-    let template_dirs = [
-        workspace_dir.join(".captain-templates"),
-        workspace_dir.join(".config/captain/readme-templates"),
-    ];
+    // Load custom header and footer from template directory
+    let template_dirs = [workspace_dir.join(".config/captain/readme-templates")];
 
     let find_template = |filename: &str| -> Option<String> {
         for dir in &template_dirs {
@@ -1760,47 +1708,6 @@ fn run_pre_push() {
         std::process::exit(0);
     }
 
-    // Build crate_name -> relative_path map for cache lookups
-    let crate_to_path: std::collections::HashMap<String, PathBuf> = metadata
-        .packages
-        .iter()
-        .filter_map(|pkg| {
-            pkg.manifest_path.parent().map(|p| {
-                let path = p.as_std_path();
-                let rel = path.strip_prefix(&workspace_root).unwrap_or(path);
-                (pkg.name.to_string(), rel.to_path_buf())
-            })
-        })
-        .collect();
-
-    // Load cache and filter out crates that haven't changed since last successful check
-    let cache = load_check_cache();
-    let mut cached_crates = Vec::new();
-    affected_crates.retain(|crate_name| {
-        if let Some(rel_path) = crate_to_path.get(crate_name) {
-            if let Some(current_hash) = get_git_tree_hash(rel_path) {
-                if cache.get(crate_name) == Some(&current_hash) {
-                    cached_crates.push(crate_name.clone());
-                    return false;
-                }
-            }
-        }
-        true
-    });
-
-    if !cached_crates.is_empty() {
-        println!(
-            "{} Skipping {} (unchanged since last check)",
-            "⏭️".dimmed(),
-            cached_crates.join(", ").dimmed()
-        );
-    }
-
-    if affected_crates.is_empty() {
-        println!("{}", "All affected crates cached, nothing to check".green());
-        std::process::exit(0);
-    }
-
     // Sort for consistent output
     let affected_crates: BTreeSet<_> = affected_crates.into_iter().collect();
 
@@ -2264,6 +2171,252 @@ fn icon_for_extension(ext: &str) -> &'static str {
     }
 }
 
+/// Prompt the user for yes/no confirmation
+fn prompt_yes_no(question: &str, default: bool) -> bool {
+    let default_hint = if default { "[Y/n]" } else { "[y/N]" };
+    print!("{} {} ", question, default_hint);
+    io::stdout().flush().unwrap();
+
+    let mut input = String::new();
+    if io::stdin().read_line(&mut input).is_err() {
+        return default;
+    }
+
+    let input = input.trim().to_lowercase();
+    if input.is_empty() {
+        return default;
+    }
+
+    matches!(input.as_str(), "y" | "yes")
+}
+
+/// Initialize captain in the current repository
+fn run_init() {
+    println!("{}", "Captain initialization".cyan().bold());
+    println!();
+
+    let workspace_dir = std::env::current_dir().unwrap();
+
+    // Check if we're in a git repo
+    let git_check = Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .output();
+
+    if git_check.is_err() || !git_check.unwrap().status.success() {
+        error!("Not in a git repository. Please run 'git init' first.");
+        std::process::exit(1);
+    }
+
+    let mut files_created = Vec::new();
+
+    // 1. Create hooks directory and hook files
+    if prompt_yes_no("Create git hooks (pre-commit, pre-push)?", true) {
+        let hooks_dir = workspace_dir.join("hooks");
+
+        // Create hooks directory
+        if !hooks_dir.exists() {
+            fs::create_dir_all(&hooks_dir).expect("Failed to create hooks directory");
+        }
+
+        // pre-commit hook
+        let pre_commit_path = hooks_dir.join("pre-commit");
+        let pre_commit_content = r#"#!/bin/bash
+captain
+"#;
+        fs::write(&pre_commit_path, pre_commit_content).expect("Failed to write pre-commit hook");
+        #[cfg(unix)]
+        {
+            let mut perms = fs::metadata(&pre_commit_path)
+                .expect("Failed to get pre-commit metadata")
+                .permissions();
+            perms.set_mode(perms.mode() | 0o111);
+            fs::set_permissions(&pre_commit_path, perms)
+                .expect("Failed to set pre-commit permissions");
+        }
+        files_created.push(pre_commit_path);
+
+        // pre-push hook
+        let pre_push_path = hooks_dir.join("pre-push");
+        let pre_push_content = r#"#!/bin/bash
+captain pre-push
+"#;
+        fs::write(&pre_push_path, pre_push_content).expect("Failed to write pre-push hook");
+        #[cfg(unix)]
+        {
+            let mut perms = fs::metadata(&pre_push_path)
+                .expect("Failed to get pre-push metadata")
+                .permissions();
+            perms.set_mode(perms.mode() | 0o111);
+            fs::set_permissions(&pre_push_path, perms)
+                .expect("Failed to set pre-push permissions");
+        }
+        files_created.push(pre_push_path);
+
+        // install.sh script
+        let install_path = hooks_dir.join("install.sh");
+        let install_content = r#"#!/usr/bin/env bash
+set -euo pipefail
+
+HOOK_SOURCE_DIR="$(git rev-parse --show-toplevel)/hooks"
+GIT_DIR="$(git rev-parse --git-dir)"
+
+copy_hook() {
+  local src="$1"
+  local dst="$2"
+
+  mkdir -p "$(dirname "$dst")"
+  cp "$src" "$dst"
+  chmod +x "$dst"
+
+  echo "✔ installed $(basename "$src") → $dst"
+}
+
+install_for_dir() {
+  local hook_dir="$1"
+
+  for hook in "$HOOK_SOURCE_DIR"/*; do
+    local name
+    name="$(basename "$hook")"
+    # Skip install.sh itself
+    if [ "$name" = "install.sh" ]; then
+      continue
+    fi
+    local target="$hook_dir/$name"
+
+    copy_hook "$hook" "$target"
+  done
+}
+
+echo "Installing hooks from $HOOK_SOURCE_DIR …"
+
+# main repo
+install_for_dir "$GIT_DIR/hooks"
+
+# worktrees
+for wt in "$GIT_DIR"/worktrees/*; do
+  if [ -d "$wt" ]; then
+    install_for_dir "$wt/hooks"
+  fi
+done
+
+echo "All hooks installed successfully."
+"#;
+        fs::write(&install_path, install_content).expect("Failed to write install.sh");
+        #[cfg(unix)]
+        {
+            let mut perms = fs::metadata(&install_path)
+                .expect("Failed to get install.sh metadata")
+                .permissions();
+            perms.set_mode(perms.mode() | 0o111);
+            fs::set_permissions(&install_path, perms)
+                .expect("Failed to set install.sh permissions");
+        }
+        files_created.push(install_path);
+
+        println!("  {} Created hooks/pre-commit", "✔".green());
+        println!("  {} Created hooks/pre-push", "✔".green());
+        println!("  {} Created hooks/install.sh", "✔".green());
+    }
+
+    // 2. Create .conductor directory with conductor.json
+    println!();
+    if prompt_yes_no("Create .conductor/conductor.json for VS Code task running?", true) {
+        let conductor_dir = workspace_dir.join(".conductor");
+
+        if !conductor_dir.exists() {
+            fs::create_dir_all(&conductor_dir).expect("Failed to create .conductor directory");
+        }
+
+        let conductor_json_path = conductor_dir.join("conductor.json");
+        let conductor_content = r#"{
+  "$schema": "https://raw.githubusercontent.com/bearcove/conductor/main/conductor.schema.json",
+  "tasks": {
+    "check": {
+      "command": "cargo check --workspace --all-targets",
+      "group": "build",
+      "problemMatcher": "$rustc",
+      "watchPatterns": ["**/*.rs", "**/Cargo.toml", "**/Cargo.lock"]
+    },
+    "clippy": {
+      "command": "cargo clippy --workspace --all-targets -- -D warnings",
+      "group": "build",
+      "problemMatcher": "$rustc",
+      "watchPatterns": ["**/*.rs", "**/Cargo.toml"]
+    },
+    "test": {
+      "command": "cargo nextest run",
+      "group": "test",
+      "watchPatterns": ["**/*.rs"]
+    }
+  }
+}
+"#;
+        fs::write(&conductor_json_path, conductor_content)
+            .expect("Failed to write conductor.json");
+        files_created.push(conductor_json_path);
+
+        println!("  {} Created .conductor/conductor.json", "✔".green());
+    }
+
+    // 3. Create README.md.in template
+    println!();
+    let readme_in_path = workspace_dir.join("README.md.in");
+    if !readme_in_path.exists() {
+        if prompt_yes_no("Create README.md.in template?", true) {
+            // Try to get the package/workspace name
+            let name = workspace_name_from_metadata(&workspace_dir)
+                .unwrap_or_else(|_| {
+                    workspace_dir
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("my-project")
+                        .to_string()
+                });
+
+            let readme_content = format!(
+                r#"**{name}** is a Rust project.
+
+## Features
+
+- Feature 1
+- Feature 2
+
+## Installation
+
+```bash
+cargo install {name}
+```
+
+## Usage
+
+```bash
+{name} --help
+```
+"#
+            );
+            fs::write(&readme_in_path, readme_content).expect("Failed to write README.md.in");
+            files_created.push(readme_in_path);
+
+            println!("  {} Created README.md.in", "✔".green());
+        }
+    } else {
+        println!("  {} README.md.in already exists, skipping", "ℹ".blue());
+    }
+
+    println!();
+
+    if files_created.is_empty() {
+        println!("{}", "No files created.".yellow());
+    } else {
+        println!("{}", "Initialization complete!".green().bold());
+        println!();
+        println!("Next steps:");
+        println!("  1. Run {} to install git hooks", "hooks/install.sh".cyan());
+        println!("  2. Run {} to generate README.md", "captain".cyan());
+        println!("  3. Commit the new files");
+    }
+}
+
 fn show_and_apply_jobs(jobs: &mut [Job]) {
     jobs.sort_by_key(|job| job.path.clone());
 
@@ -2322,6 +2475,10 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 1 && args[1] == "pre-push" {
         run_pre_push();
+        return;
+    }
+    if args.len() > 1 && args[1] == "init" {
+        run_init();
         return;
     }
     if args.len() > 1 && args[1] == "debug-packages" {
