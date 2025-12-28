@@ -323,7 +323,7 @@ fn get_git_tree_hash(path: &Path) -> Option<String> {
     }
 }
 
-/// Cache file location: .git/facet-dev-cache.json
+/// Cache file location: .git/captain-cache.json
 fn get_cache_path() -> Option<PathBuf> {
     let output = Command::new("git")
         .args(["rev-parse", "--git-dir"])
@@ -331,7 +331,7 @@ fn get_cache_path() -> Option<PathBuf> {
         .ok()?;
     if output.status.success() {
         let git_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        Some(PathBuf::from(git_dir).join("facet-dev-cache.json"))
+        Some(PathBuf::from(git_dir).join("captain-cache.json"))
     } else {
         None
     }
@@ -359,9 +359,9 @@ fn save_check_cache(cache: &std::collections::HashMap<String, String>) {
     }
 }
 
-/// Configuration read from `[workspace.metadata.facet-dev]` in Cargo.toml
+/// Configuration read from `[workspace.metadata.captain]` in Cargo.toml
 #[derive(Debug)]
-struct FacetDevConfig {
+struct CaptainConfig {
     // Pre-commit jobs
     generate_readmes: bool,
     rustfmt: bool,
@@ -386,32 +386,32 @@ struct FacetDevConfig {
     cargo_shear: bool,
 }
 
-fn load_facet_dev_config() -> FacetDevConfig {
+fn load_captain_config() -> CaptainConfig {
     let metadata = match cargo_metadata::MetadataCommand::new().exec() {
         Ok(m) => m,
         Err(e) => {
             debug!("Failed to load workspace metadata for config: {e}");
-            return FacetDevConfig::default();
+            return CaptainConfig::default();
         }
     };
 
-    // Try [package.metadata.facet-dev] first (more specific), then fall back to
-    // [workspace.metadata.facet-dev]
-    let facet_dev = metadata
+    // Try [package.metadata.captain] first (more specific), then fall back to
+    // [workspace.metadata.captain]
+    let captain_cfg = metadata
         .root_package()
-        .and_then(|p| p.metadata.get("facet-dev"))
-        .or_else(|| metadata.workspace_metadata.get("facet-dev"));
+        .and_then(|p| p.metadata.get("captain"))
+        .or_else(|| metadata.workspace_metadata.get("captain"));
 
-    let facet_dev = match facet_dev {
+    let captain_cfg = match captain_cfg {
         Some(v) => v,
-        None => return FacetDevConfig::default(),
+        None => return CaptainConfig::default(),
     };
 
-    let get_bool = |key: &str| -> Option<bool> { facet_dev.get(key).and_then(|v| v.as_bool()) };
+    let get_bool = |key: &str| -> Option<bool> { captain_cfg.get(key).and_then(|v| v.as_bool()) };
 
     // Helper to parse feature config: array of strings, or false for no features
     let parse_features = |key: &str| -> Option<Vec<String>> {
-        facet_dev.get(key).and_then(|v| {
+        captain_cfg.get(key).and_then(|v| {
             if let Some(arr) = v.as_array() {
                 Some(
                     arr.iter()
@@ -431,7 +431,7 @@ fn load_facet_dev_config() -> FacetDevConfig {
     let doc_test_features = parse_features("doc-test-features");
     let docs_features = parse_features("docs-features");
 
-    FacetDevConfig {
+    CaptainConfig {
         // Pre-commit jobs
         generate_readmes: get_bool("generate-readmes").unwrap_or(true),
         rustfmt: get_bool("rustfmt").unwrap_or(true),
@@ -452,7 +452,7 @@ fn load_facet_dev_config() -> FacetDevConfig {
     }
 }
 
-impl Default for FacetDevConfig {
+impl Default for CaptainConfig {
     fn default() -> Self {
         Self {
             // Pre-commit jobs
@@ -493,10 +493,10 @@ fn enqueue_readme_jobs(
     let template_name = "README.md.in";
 
     // Load custom header and footer from template directories if available
-    // Check .facet-dev-templates/ first, then fall back to .config/facet-dev/readme-templates/
+    // Check .captain-templates/ first, then fall back to .config/captain/readme-templates/
     let template_dirs = [
-        workspace_dir.join(".facet-dev-templates"),
-        workspace_dir.join(".config/facet-dev/readme-templates"),
+        workspace_dir.join(".captain-templates"),
+        workspace_dir.join(".config/captain/readme-templates"),
     ];
 
     let find_template = |filename: &str| -> Option<String> {
@@ -660,7 +660,7 @@ fn enqueue_readme_jobs(
                 // Fall back to crate's own template
                 crate_path.join(template_name)
             }
-        } else if crate_name == "facet" {
+        } else if crate_name == "captain" {
             Path::new(template_name).to_path_buf()
         } else {
             crate_path.join(template_name)
@@ -685,7 +685,7 @@ fn enqueue_readme_jobs(
             let fallback = workspace_dir
                 .file_name()
                 .and_then(|name| name.to_str())
-                .unwrap_or("facet")
+                .unwrap_or("captain")
                 .to_string();
             warn!(
                 "Failed to determine workspace name via cargo metadata: {err}, falling back to '{fallback}'"
@@ -785,7 +785,7 @@ fn package_name_by_id<'a>(metadata: &'a serde_json::Value, package_id: &str) -> 
     None
 }
 
-/// Check if a crate has `generate-readmes = false` in its `[package.metadata.facet-dev]`
+/// Check if a crate has `generate-readmes = false` in its `[package.metadata.captain]`
 fn crate_has_readme_disabled(cargo_toml_path: &Path) -> bool {
     let content = match fs::read_to_string(cargo_toml_path) {
         Ok(c) => c,
@@ -797,7 +797,7 @@ fn crate_has_readme_disabled(cargo_toml_path: &Path) -> bool {
     };
     doc.get("package")
         .and_then(|p| p.get("metadata"))
-        .and_then(|m| m.get("facet-dev"))
+        .and_then(|m| m.get("captain"))
         .and_then(|f| f.get("generate-readmes"))
         .and_then(|v| v.as_bool())
         == Some(false)
@@ -1423,9 +1423,9 @@ fn debug_packages() {
     println!("\n✅ Total packages: {}", metadata.packages.len());
 }
 
-/// Get the shared target directory for pre-push checks (~/.facet-dev/target)
+/// Get the shared target directory for pre-push checks (~/.captain/target)
 fn get_shared_target_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".facet-dev").join("target"))
+    dirs::home_dir().map(|home| home.join(".captain").join("target"))
 }
 
 /// Calculate directory size recursively (returns bytes)
@@ -1468,7 +1468,7 @@ fn format_size(bytes: u64) -> String {
 fn run_pre_push() {
     use std::collections::{BTreeSet, HashSet};
 
-    let mut config = load_facet_dev_config();
+    let mut config = load_captain_config();
 
     // HAVE_MERCY levels:
     // 1 (or just set) = skip slow checks (tests, doc tests, docs)
@@ -2352,8 +2352,8 @@ fn main() {
         }
     };
 
-    // Load facet-dev config from [workspace.metadata.facet-dev]
-    let config = load_facet_dev_config();
+    // Load captain config from [workspace.metadata.captain]
+    let config = load_captain_config();
 
     // Check edition 2024 requirement (bails if not met)
     if config.edition_2024 {

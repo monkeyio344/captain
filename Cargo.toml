@@ -1,8 +1,8 @@
 [package]
-name = "facet-dev"
+name = "captain"
 version = "0.1.1"
 edition = "2024"
-description = "Internal development utilities for Facet"
+description = "Development automation tool for Rust workspaces"
 keywords = ["code-generation", "templates"]
 categories = ["development-tools"]
 rust-version = "1.87"

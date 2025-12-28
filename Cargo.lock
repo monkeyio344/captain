@@ -24,6 +24,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "captain"
+version = "0.1.1"
+dependencies = [
+ "cargo_metadata",
+ "dirs",
+ "fs-err",
+ "log",
+ "owo-colors",
+ "serde_json",
+ "strip-ansi-escapes",
+ "supports-color",
+ "toml_edit",
+]
+
+[[package]]
 name = "cargo-platform"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -79,21 +94,6 @@ name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
-
-[[package]]
-name = "facet-dev"
-version = "0.1.1"
-dependencies = [
- "cargo_metadata",
- "dirs",
- "fs-err",
- "log",
- "owo-colors",
- "serde_json",
- "strip-ansi-escapes",
- "supports-color",
- "toml_edit",
-]
 
 [[package]]
 name = "fs-err"

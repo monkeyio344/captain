@@ -1,22 +1,22 @@
-# facet-dev
+# captain
 
-[![Coverage Status](https://coveralls.io/repos/github/facet-rs/facet-dev/badge.svg?branch=main)](https://coveralls.io/github/facet-rs/facet?branch=main)
-[![crates.io](https://img.shields.io/crates/v/facet-dev.svg)](https://crates.io/crates/facet-dev)
-[![documentation](https://docs.rs/facet-dev/badge.svg)](https://docs.rs/facet-dev)
-[![MIT/Apache-2.0 licensed](https://img.shields.io/crates/l/facet-dev.svg)](./LICENSE)
-[![Discord](https://img.shields.io/discord/1379550208551026748?logo=discord&label=discord)](https://discord.gg/JhD7CwCJ8F)
+[![crates.io](https://img.shields.io/crates/v/captain.svg)](https://crates.io/crates/captain)
+[![documentation](https://docs.rs/captain/badge.svg)](https://docs.rs/captain)
+[![MIT/Apache-2.0 licensed](https://img.shields.io/crates/l/captain.svg)](./LICENSE)
 
-**facet-dev** is a comprehensive development automation tool for Rust workspaces.
+**captain** is a comprehensive development automation tool for Rust workspaces.
 It integrates seamlessly as a pre-commit hook and handles repetitive project setup,
 code generation, and CI/CD configuration automatically.
 
+> This project was originally forked from [facet-dev](https://github.com/facet-rs/facet-dev).
+
 ## Features
 
-facet-dev automates the following tasks:
+captain automates the following tasks:
 
 - **README Generation**: Generates `README.md` files from `README.md.in` templates with customizable headers and footers
 - **Code Formatting**: Runs `cargo fmt` to enforce consistent code style
-- **Pre-push Verification**: Validates code before pushing (via `facet-dev pre-push`):
+- **Pre-push Verification**: Validates code before pushing (via `captain pre-push`):
   - Runs clippy for linting
   - Executes tests
   - Checks documentation compilation
@@ -26,26 +26,26 @@ facet-dev automates the following tasks:
 
 ## Installation
 
-Install facet-dev from crates.io:
+Install captain from crates.io:
 
 ```bash
-cargo install facet-dev
+cargo install captain
 ```
 
 Or build from source:
 
 ```bash
-cargo install --git https://github.com/facet-rs/facet-dev
+cargo install --git https://github.com/bearcove/captain
 ```
 
 ## Usage
 
 ### Basic Generation
 
-Run facet-dev in your workspace root to generate/update all project files:
+Run captain in your workspace root to generate/update all project files:
 
 ```bash
-facet-dev
+captain
 ```
 
 This will:
@@ -58,7 +58,7 @@ This will:
 Before pushing to a remote repository, run:
 
 ```bash
-facet-dev pre-push
+captain pre-push
 ```
 
 This performs comprehensive checks:
@@ -72,7 +72,7 @@ This performs comprehensive checks:
 Specify a custom directory for looking up `README.md.in` templates:
 
 ```bash
-facet-dev --template-dir /path/to/templates
+captain --template-dir /path/to/templates
 ```
 
 This searches for `{crate_name}.md.in` files in the specified directory, falling back
@@ -83,7 +83,7 @@ to the crate's own template if not found.
 View workspace metadata and package information:
 
 ```bash
-facet-dev debug-packages
+captain debug-packages
 ```
 
 ## README Template Configuration
@@ -95,15 +95,15 @@ combines three parts:
 
 1. **Header** (with badges and links)
 2. **Main Content** (from `README.md.in`)
-3. **Footer** (with sponsors and license information)
+3. **Footer** (with license information)
 
 ### Custom Header and Footer
 
-To customize the README header and footer templates project-wide, create a `.facet-dev-templates`
+To customize the README header and footer templates project-wide, create a `.captain-templates`
 directory at your workspace root with custom templates:
 
 ```bash
-.facet-dev-templates/
+.captain-templates/
 ├── readme-header.md
 └── readme-footer.md
 ```
@@ -127,7 +127,7 @@ The `{CRATE}` placeholder will be replaced with the actual crate name.
 Licensed under the MIT License.
 ```
 
-If these files don't exist, facet-dev uses the built-in default templates.
+If these files don't exist, captain uses the built-in default templates.
 
 ### Template Priority
 
@@ -139,7 +139,7 @@ For `README.md.in` templates (main content):
 
 ## Pre-commit Hook Setup
 
-facet-dev includes a helper script to install git hooks for the repository and all
+captain includes a helper script to install git hooks for the repository and all
 worktrees. This is typically done automatically during initial setup, but you can
 run it manually:
 
@@ -148,21 +148,21 @@ run it manually:
 ```
 
 This installs hooks that:
-- **pre-commit**: Runs `facet-dev` to auto-generate and stage files
-- **pre-push**: Runs `facet-dev pre-push` for comprehensive validation
+- **pre-commit**: Runs `captain` to auto-generate and stage files
+- **pre-push**: Runs `captain pre-push` for comprehensive validation
 
 ## Configuration
 
-facet-dev can be configured via `[package.metadata.facet-dev]` or `[workspace.metadata.facet-dev]` in your `Cargo.toml`. Package metadata takes precedence over workspace metadata.
+captain can be configured via `[package.metadata.captain]` or `[workspace.metadata.captain]` in your `Cargo.toml`. Package metadata takes precedence over workspace metadata.
 
 ```toml
 # For single-crate projects:
-[package.metadata.facet-dev]
+[package.metadata.captain]
 generate-readmes = false  # Disable README generation (default: true)
 clippy = false            # Disable clippy checks on pre-push
 
 # For workspaces (applies to all crates):
-[workspace.metadata.facet-dev]
+[workspace.metadata.captain]
 generate-readmes = false
 ```
 
@@ -194,9 +194,9 @@ All options default to `true`. Set to `false` to disable.
 
 ### Automatic Staging
 
-When facet-dev runs, it automatically stages all generated files with `git add`.
-If facet-dev is updated mid-development, the new changes might appear in an unrelated PR.
-This is by design—keep facet-dev stable during active work.
+When captain runs, it automatically stages all generated files with `git add`.
+If captain is updated mid-development, the new changes might appear in an unrelated PR.
+This is by design—keep captain stable during active work.
 
 ### Workspace Requirements
 
@@ -205,52 +205,11 @@ Your project should:
 - Have git initialized
 - Have `README.md.in` template files for any crates you want documented
 
-## Sponsors
-
-Thanks to all individual sponsors:
-
-<p> <a href="https://github.com/sponsors/fasterthanlime">
-<picture>
-<source media="(prefers-color-scheme: dark)" srcset="https://github.com/facet-rs/facet/raw/main/static/sponsors-v3/github-dark.svg">
-<img src="https://github.com/facet-rs/facet/raw/main/static/sponsors-v3/github-light.svg" height="40" alt="GitHub Sponsors">
-</picture>
-</a> <a href="https://patreon.com/fasterthanlime">
-    <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/facet-rs/facet/raw/main/static/sponsors-v3/patreon-dark.svg">
-    <img src="https://github.com/facet-rs/facet/raw/main/static/sponsors-v3/patreon-light.svg" height="40" alt="Patreon">
-    </picture>
-</a> </p>
-
-...along with corporate sponsors:
-
-<p> <a href="https://aws.amazon.com">
-<picture>
-<source media="(prefers-color-scheme: dark)" srcset="https://github.com/facet-rs/facet/raw/main/static/sponsors-v3/aws-dark.svg">
-<img src="https://github.com/facet-rs/facet/raw/main/static/sponsors-v3/aws-light.svg" height="40" alt="AWS">
-</picture>
-</a> <a href="https://zed.dev">
-<picture>
-<source media="(prefers-color-scheme: dark)" srcset="https://github.com/facet-rs/facet/raw/main/static/sponsors-v3/zed-dark.svg">
-<img src="https://github.com/facet-rs/facet/raw/main/static/sponsors-v3/zed-light.svg" height="40" alt="Zed">
-</picture>
-</a> <a href="https://depot.dev?utm_source=facet">
-<picture>
-<source media="(prefers-color-scheme: dark)" srcset="https://github.com/facet-rs/facet/raw/main/static/sponsors-v3/depot-dark.svg">
-<img src="https://github.com/facet-rs/facet/raw/main/static/sponsors-v3/depot-light.svg" height="40" alt="Depot">
-</picture>
-</a> </p>
-
-...without whom this work could not exist.
-
-## Special thanks
-
-The facet logo was drawn by [Misiasart](https://misiasart.com/).
-
 ## License
 
 Licensed under either of:
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](https://github.com/facet-rs/facet/blob/main/LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
-- MIT license ([LICENSE-MIT](https://github.com/facet-rs/facet/blob/main/LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+- Apache License, Version 2.0 ([LICENSE-APACHE](./LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](./LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
 
 at your option.
