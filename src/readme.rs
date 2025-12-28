@@ -6,20 +6,33 @@ pub struct GenerateReadmeOpts {
 }
 
 pub fn generate(opts: GenerateReadmeOpts) -> String {
-    // Generate header by replacing "{CRATE}" in the provided or default header template
-    let header_template = opts.header.as_deref().unwrap_or(include_str!("header.md"));
-    let header = header_template.replace("{CRATE}", &opts.crate_name);
+    // Generate header by replacing "{CRATE}" in the provided header template (empty if not configured)
+    let header = opts
+        .header
+        .as_deref()
+        .unwrap_or("")
+        .replace("{CRATE}", &opts.crate_name);
 
     // The main template content, passed in via `opts.input`
     let template_content = opts.input;
 
-    // Use provided footer or default footer template
+    // Use provided footer or empty (no built-in defaults)
     let footer = opts
         .footer
         .as_deref()
-        .unwrap_or(include_str!("footer.md"))
-        .to_string();
+        .unwrap_or("")
+        .replace("{CRATE}", &opts.crate_name);
 
-    // Combine header, template, and footer with newlines
-    format!("{header}\n{template_content}\n{footer}")
+    // Combine header, template, and footer
+    // Only add newlines between non-empty sections
+    let mut parts = Vec::new();
+    if !header.is_empty() {
+        parts.push(header);
+    }
+    parts.push(template_content);
+    if !footer.is_empty() {
+        parts.push(footer);
+    }
+
+    parts.join("\n")
 }

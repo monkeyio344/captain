@@ -52,6 +52,7 @@ This interactively creates:
 - `hooks/` directory with pre-commit and pre-push hooks
 - `hooks/install.sh` to install the hooks
 - `.conductor/conductor.json` for VS Code task running (optional)
+- `.config/captain/readme-templates/` with empty header/footer templates
 - `README.md.in` template (if not present)
 
 ### Basic Generation
@@ -111,16 +112,17 @@ combines three parts:
 2. **Main Content** (from `README.md.in`)
 3. **Footer** (with license information)
 
-### Custom Header and Footer
+### Header and Footer Templates
 
-To customize the README header and footer templates project-wide, create a `.config/captain/readme-templates`
-directory at your workspace root with custom templates:
+Captain looks for header and footer templates in `.config/captain/readme-templates/`:
 
 ```bash
 .config/captain/readme-templates/
 ├── readme-header.md
 └── readme-footer.md
 ```
+
+These are prepended/appended to every generated `README.md`. If not present, no header or footer is added.
 
 **Header Template Example** (`readme-header.md`):
 
@@ -141,7 +143,7 @@ The `{CRATE}` placeholder will be replaced with the actual crate name.
 Licensed under the MIT License.
 ```
 
-If these files don't exist, captain uses the built-in default templates.
+Run `captain init` to create empty templates that you can customize.
 
 ### Template Priority
 

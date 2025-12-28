@@ -2358,23 +2358,57 @@ echo "All hooks installed successfully."
         println!("  {} Created .conductor/conductor.json", "✔".green());
     }
 
-    // 3. Create README.md.in template
+    // 3. Create README templates directory with empty header/footer
+    println!();
+    let templates_dir = workspace_dir.join(".config/captain/readme-templates");
+    if !templates_dir.exists() {
+        if prompt_yes_no("Create .config/captain/readme-templates/ with empty header/footer?", true) {
+            fs::create_dir_all(&templates_dir).expect("Failed to create readme-templates directory");
+
+            let header_path = templates_dir.join("readme-header.md");
+            let footer_path = templates_dir.join("readme-footer.md");
+
+            // Create empty templates (users can customize)
+            fs::write(&header_path, "").expect("Failed to write readme-header.md");
+            fs::write(&footer_path, "").expect("Failed to write readme-footer.md");
+
+            files_created.push(header_path);
+            files_created.push(footer_path);
+
+            println!(
+                "  {} Created .config/captain/readme-templates/readme-header.md",
+                "✔".green()
+            );
+            println!(
+                "  {} Created .config/captain/readme-templates/readme-footer.md",
+                "✔".green()
+            );
+        }
+    } else {
+        println!(
+            "  {} .config/captain/readme-templates/ already exists, skipping",
+            "ℹ".blue()
+        );
+    }
+
+    // 4. Create README.md.in template
     println!();
     let readme_in_path = workspace_dir.join("README.md.in");
     if !readme_in_path.exists() {
         if prompt_yes_no("Create README.md.in template?", true) {
             // Try to get the package/workspace name
-            let name = workspace_name_from_metadata(&workspace_dir)
-                .unwrap_or_else(|_| {
-                    workspace_dir
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("my-project")
-                        .to_string()
-                });
+            let name = workspace_name_from_metadata(&workspace_dir).unwrap_or_else(|_| {
+                workspace_dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("my-project")
+                    .to_string()
+            });
 
             let readme_content = format!(
-                r#"**{name}** is a Rust project.
+                r#"# {name}
+
+A Rust project.
 
 ## Features
 
