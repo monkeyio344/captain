@@ -314,7 +314,7 @@ fn check_edition_2024() {
 
 /// Configuration read from `.config/captain/config.kdl`
 #[derive(Debug, facet::Facet)]
-#[facet(default)]
+#[facet(default, rename_all = "kebab-case")]
 struct CaptainConfig {
     #[facet(kdl::child, default)]
     pre_commit: PreCommitConfig,
@@ -324,7 +324,7 @@ struct CaptainConfig {
 }
 
 #[derive(Debug, facet::Facet)]
-#[facet(default)]
+#[facet(default, rename_all = "kebab-case")]
 struct PreCommitConfig {
     #[facet(kdl::property, default = true)]
     generate_readmes: bool,
@@ -341,7 +341,7 @@ struct PreCommitConfig {
 }
 
 #[derive(Debug, facet::Facet)]
-#[facet(default)]
+#[facet(default, rename_all = "kebab-case")]
 struct PrePushConfig {
     #[facet(kdl::property, default = true)]
     clippy: bool,
@@ -2381,23 +2381,24 @@ echo "All hooks installed successfully."
 
             // Create default config.kdl
             let config_content = r#"// Captain configuration
-// All options default to true. Set to false to disable.
+// All options default to #true. Use #false to disable.
+// See: https://kdl.dev for KDL syntax
 
 pre-commit {
-    // generate-readmes false
-    // rustfmt false
-    // cargo-lock false
-    // arborium false
-    // rust-version false
-    // edition-2024 false
+    // generate-readmes #false
+    // rustfmt #false
+    // cargo-lock #false
+    // arborium #false
+    // rust-version #false
+    // edition-2024 #false
 }
 
 pre-push {
-    // clippy false
-    // nextest false
-    // doc-tests false
-    // docs false
-    // cargo-shear false
+    // clippy #false
+    // nextest #false
+    // doc-tests #false
+    // docs #false
+    // cargo-shear #false
 
     // Feature configuration (uncomment and customize as needed)
     // clippy-features "feature1" "feature2"
@@ -2751,8 +2752,133 @@ fn setup_logger() {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
-    fn it_works() {
-        // well, it does work!
+    fn empty_config_uses_defaults() {
+        let config: CaptainConfig = facet_kdl::from_str("").unwrap();
+        assert!(config.pre_commit.generate_readmes);
+        assert!(config.pre_commit.rustfmt);
+        assert!(config.pre_commit.cargo_lock);
+        assert!(config.pre_commit.arborium);
+        assert!(config.pre_commit.rust_version);
+        assert!(config.pre_commit.edition_2024);
+        assert!(config.pre_push.clippy);
+        assert!(config.pre_push.nextest);
+        assert!(config.pre_push.doc_tests);
+        assert!(config.pre_push.docs);
+        assert!(config.pre_push.cargo_shear);
+        assert!(config.pre_push.clippy_features.is_none());
+        assert!(config.pre_push.doc_test_features.is_none());
+        assert!(config.pre_push.docs_features.is_none());
+    }
+
+    #[test]
+    fn empty_blocks_use_defaults() {
+        let kdl = r#"
+            pre-commit {
+            }
+            pre-push {
+            }
+        "#;
+        let config: CaptainConfig = facet_kdl::from_str(kdl).unwrap();
+        assert!(config.pre_commit.generate_readmes);
+        assert!(config.pre_push.clippy);
+    }
+
+    #[test]
+    fn disable_pre_commit_options() {
+        // KDL v2 uses #false for boolean false
+        let kdl = r#"
+            pre-commit generate-readmes=#false rustfmt=#false cargo-lock=#false
+        "#;
+        let config: CaptainConfig = facet_kdl::from_str(kdl).unwrap();
+        assert!(!config.pre_commit.generate_readmes);
+        assert!(!config.pre_commit.rustfmt);
+        assert!(!config.pre_commit.cargo_lock);
+        // Others still default to true
+        assert!(config.pre_commit.arborium);
+        assert!(config.pre_commit.rust_version);
+        assert!(config.pre_commit.edition_2024);
+    }
+
+    #[test]
+    fn disable_pre_push_options() {
+        let kdl = r#"
+            pre-push clippy=#false nextest=#false doc-tests=#false docs=#false cargo-shear=#false
+        "#;
+        let config: CaptainConfig = facet_kdl::from_str(kdl).unwrap();
+        assert!(!config.pre_push.clippy);
+        assert!(!config.pre_push.nextest);
+        assert!(!config.pre_push.doc_tests);
+        assert!(!config.pre_push.docs);
+        assert!(!config.pre_push.cargo_shear);
+    }
+
+    #[test]
+    fn feature_lists() {
+        let kdl = r#"
+            pre-push {
+                clippy-features "serde" "async"
+                doc-test-features "full"
+                docs-features "all-features" "experimental"
+            }
+        "#;
+        let config: CaptainConfig = facet_kdl::from_str(kdl).unwrap();
+
+        let clippy_features = config.pre_push.clippy_features.unwrap();
+        assert_eq!(clippy_features.features, vec!["serde", "async"]);
+
+        let doc_test_features = config.pre_push.doc_test_features.unwrap();
+        assert_eq!(doc_test_features.features, vec!["full"]);
+
+        let docs_features = config.pre_push.docs_features.unwrap();
+        assert_eq!(docs_features.features, vec!["all-features", "experimental"]);
+    }
+
+    #[test]
+    fn mixed_config() {
+        let kdl = r#"
+            pre-commit generate-readmes=#false arborium=#false
+            pre-push nextest=#false {
+                clippy-features "serde"
+            }
+        "#;
+        let config: CaptainConfig = facet_kdl::from_str(kdl).unwrap();
+
+        assert!(!config.pre_commit.generate_readmes);
+        assert!(config.pre_commit.rustfmt); // default
+        assert!(!config.pre_commit.arborium);
+
+        assert!(config.pre_push.clippy); // default
+        assert!(!config.pre_push.nextest);
+
+        let clippy_features = config.pre_push.clippy_features.unwrap();
+        assert_eq!(clippy_features.features, vec!["serde"]);
+    }
+
+    #[test]
+    fn only_pre_commit_block() {
+        let kdl = r#"
+            pre-commit rustfmt=#false
+        "#;
+        let config: CaptainConfig = facet_kdl::from_str(kdl).unwrap();
+        assert!(!config.pre_commit.rustfmt);
+        // pre-push defaults
+        assert!(config.pre_push.clippy);
+        assert!(config.pre_push.nextest);
+    }
+
+    #[test]
+    fn only_pre_push_block() {
+        let kdl = r#"
+            pre-push clippy=#false
+        "#;
+        let config: CaptainConfig = facet_kdl::from_str(kdl).unwrap();
+        // pre-commit defaults
+        assert!(config.pre_commit.generate_readmes);
+        assert!(config.pre_commit.rustfmt);
+        // pre-push override
+        assert!(!config.pre_push.clippy);
     }
 }

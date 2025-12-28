@@ -168,24 +168,10 @@ Captain is configured via `.config/captain/config.kdl`:
 
 ```kdl
 // Captain configuration
-// All options default to true. Set properties to false to disable.
+// All options default to true. Set properties to #false to disable.
 
-pre-commit {
-    generate-readmes false
-    rustfmt false
-    cargo-lock false
-    arborium false
-    rust-version false
-    edition-2024 false
-}
-
-pre-push {
-    clippy false
-    nextest false
-    doc-tests false
-    docs false
-    cargo-shear false
-
+pre-commit generate-readmes=#false rustfmt=#false cargo-lock=#false
+pre-push clippy=#false nextest=#false {
     // Feature configuration (for specific cargo commands)
     clippy-features "feature1" "feature2"
     doc-test-features "feature1"
