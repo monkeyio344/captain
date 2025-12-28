@@ -311,9 +311,8 @@ fn check_edition_2024() {
     }
 }
 
-
 /// Configuration read from `.config/captain/config.kdl`
-#[derive(Debug, facet::Facet)]
+#[derive(Debug, Default, facet::Facet)]
 #[facet(default, rename_all = "kebab-case")]
 struct CaptainConfig {
     #[facet(kdl::child, default)]
@@ -381,7 +380,10 @@ fn load_captain_config() -> CaptainConfig {
     let config_path = get_config_path();
 
     if !config_path.exists() {
-        debug!("No config file at {}, using defaults", config_path.display());
+        debug!(
+            "No config file at {}, using defaults",
+            config_path.display()
+        );
         return CaptainConfig::default();
     }
 
@@ -398,15 +400,6 @@ fn load_captain_config() -> CaptainConfig {
         Err(e) => {
             error!("Failed to parse {}: {e}", config_path.display());
             std::process::exit(1);
-        }
-    }
-}
-
-impl Default for CaptainConfig {
-    fn default() -> Self {
-        Self {
-            pre_commit: PreCommitConfig::default(),
-            pre_push: PrePushConfig::default(),
         }
     }
 }
@@ -1882,25 +1875,26 @@ fn run_pre_push() {
     };
 
     // 3. Spawn cargo-shear in background (doesn't need cargo lock)
-    let shear_handle: Option<std::thread::JoinHandle<CommandResult>> = if config.pre_push.cargo_shear {
-        println!("  {} Running cargo-shear in background...", "✂️".cyan());
-        let handle = std::thread::spawn(move || {
-            let start = std::time::Instant::now();
-            let shear_command = vec!["cargo".to_string(), "shear".to_string()];
-            let mut cmd = command_with_color(&shear_command[0]);
-            for arg in &shear_command[1..] {
-                cmd.arg(arg);
-            }
-            cmd.stdout(Stdio::piped());
-            cmd.stderr(Stdio::piped());
-            let output = cmd.output();
-            let elapsed = start.elapsed();
-            (shear_command, output, elapsed)
-        });
-        Some(handle)
-    } else {
-        None
-    };
+    let shear_handle: Option<std::thread::JoinHandle<CommandResult>> =
+        if config.pre_push.cargo_shear {
+            println!("  {} Running cargo-shear in background...", "✂️".cyan());
+            let handle = std::thread::spawn(move || {
+                let start = std::time::Instant::now();
+                let shear_command = vec!["cargo".to_string(), "shear".to_string()];
+                let mut cmd = command_with_color(&shear_command[0]);
+                for arg in &shear_command[1..] {
+                    cmd.arg(arg);
+                }
+                cmd.stdout(Stdio::piped());
+                cmd.stderr(Stdio::piped());
+                let output = cmd.output();
+                let elapsed = start.elapsed();
+                (shear_command, output, elapsed)
+            });
+            Some(handle)
+        } else {
+            None
+        };
 
     // 4. Run doc tests (while tests run in background)
     if config.pre_push.doc_tests {
@@ -2258,8 +2252,7 @@ captain pre-push
                 .expect("Failed to get pre-push metadata")
                 .permissions();
             perms.set_mode(perms.mode() | 0o111);
-            fs::set_permissions(&pre_push_path, perms)
-                .expect("Failed to set pre-push permissions");
+            fs::set_permissions(&pre_push_path, perms).expect("Failed to set pre-push permissions");
         }
         files_created.push(pre_push_path);
 
@@ -2331,7 +2324,10 @@ echo "All hooks installed successfully."
 
     // 2. Create .conductor directory with conductor.json
     println!();
-    if prompt_yes_no("Create .conductor/conductor.json for VS Code task running?", true) {
+    if prompt_yes_no(
+        "Create .conductor/conductor.json for VS Code task running?",
+        true,
+    ) {
         let conductor_dir = workspace_dir.join(".conductor");
 
         if !conductor_dir.exists() {
@@ -2362,8 +2358,7 @@ echo "All hooks installed successfully."
   }
 }
 "#;
-        fs::write(&conductor_json_path, conductor_content)
-            .expect("Failed to write conductor.json");
+        fs::write(&conductor_json_path, conductor_content).expect("Failed to write conductor.json");
         files_created.push(conductor_json_path);
 
         println!("  {} Created .conductor/conductor.json", "✔".green());
@@ -2376,7 +2371,10 @@ echo "All hooks installed successfully."
     let templates_dir = captain_dir.join("readme-templates");
 
     if !captain_dir.exists() {
-        if prompt_yes_no("Create .config/captain/ with config.kdl and readme templates?", true) {
+        if prompt_yes_no(
+            "Create .config/captain/ with config.kdl and readme templates?",
+            true,
+        ) {
             fs::create_dir_all(&templates_dir).expect("Failed to create captain config directory");
 
             // Create default config.kdl
@@ -2430,10 +2428,7 @@ pre-push {
             );
         }
     } else {
-        println!(
-            "  {} .config/captain/ already exists, skipping",
-            "ℹ".blue()
-        );
+        println!("  {} .config/captain/ already exists, skipping", "ℹ".blue());
     }
 
     // 4. Create README.md.in template
@@ -2490,7 +2485,10 @@ cargo install {name}
         println!("{}", "Initialization complete!".green().bold());
         println!();
         println!("Next steps:");
-        println!("  1. Run {} to install git hooks", "hooks/install.sh".cyan());
+        println!(
+            "  1. Run {} to install git hooks",
+            "hooks/install.sh".cyan()
+        );
         println!("  2. Run {} to generate README.md", "captain".cyan());
         println!("  3. Commit the new files");
     }

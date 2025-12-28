@@ -21,6 +21,10 @@ install_for_dir() {
   for hook in "$HOOK_SOURCE_DIR"/*; do
     local name
     name="$(basename "$hook")"
+    # Skip install.sh itself
+    if [ "$name" = "install.sh" ]; then
+      continue
+    fi
     local target="$hook_dir/$name"
 
     copy_hook "$hook" "$target"
