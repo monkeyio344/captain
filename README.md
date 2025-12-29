@@ -51,7 +51,7 @@ captain init
 This interactively creates:
 - `hooks/` directory with pre-commit and pre-push hooks
 - `hooks/install.sh` to install the hooks
-- `.conductor/conductor.json` for VS Code task running (optional)
+- `conductor.json` for [Conductor](https://www.conductor.build/) setup (optional)
 - `.config/captain/config.kdl` configuration file
 - `.config/captain/readme-templates/` with empty header/footer templates
 - `README.md.in` template (if not present)

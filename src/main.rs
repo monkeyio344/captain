@@ -2322,46 +2322,23 @@ echo "All hooks installed successfully."
         println!("  {} Created hooks/install.sh", "✔".green());
     }
 
-    // 2. Create .conductor directory with conductor.json
+    // 2. Create conductor.json for https://www.conductor.build/
     println!();
     if prompt_yes_no(
-        "Create .conductor/conductor.json for VS Code task running?",
+        "Create conductor.json for Conductor (conductor.build)?",
         true,
     ) {
-        let conductor_dir = workspace_dir.join(".conductor");
-
-        if !conductor_dir.exists() {
-            fs::create_dir_all(&conductor_dir).expect("Failed to create .conductor directory");
-        }
-
-        let conductor_json_path = conductor_dir.join("conductor.json");
+        let conductor_json_path = workspace_dir.join("conductor.json");
         let conductor_content = r#"{
-  "$schema": "https://raw.githubusercontent.com/bearcove/conductor/main/conductor.schema.json",
-  "tasks": {
-    "check": {
-      "command": "cargo check --workspace --all-targets",
-      "group": "build",
-      "problemMatcher": "$rustc",
-      "watchPatterns": ["**/*.rs", "**/Cargo.toml", "**/Cargo.lock"]
-    },
-    "clippy": {
-      "command": "cargo clippy --workspace --all-targets -- -D warnings",
-      "group": "build",
-      "problemMatcher": "$rustc",
-      "watchPatterns": ["**/*.rs", "**/Cargo.toml"]
-    },
-    "test": {
-      "command": "cargo nextest run",
-      "group": "test",
-      "watchPatterns": ["**/*.rs"]
-    }
+  "scripts": {
+    "setup": "hooks/install.sh"
   }
 }
 "#;
         fs::write(&conductor_json_path, conductor_content).expect("Failed to write conductor.json");
         files_created.push(conductor_json_path);
 
-        println!("  {} Created .conductor/conductor.json", "✔".green());
+        println!("  {} Created conductor.json", "✔".green());
     }
 
     // 3. Create .config/captain/ directory with config.kdl and templates
