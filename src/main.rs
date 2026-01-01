@@ -19,7 +19,7 @@ use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
 mod readme;
 mod utils;
 
-use utils::{dir_size, format_size};
+use utils::{TaskProgress, dir_size, format_size};
 
 fn terminal_supports_color(stream: ColorStream) -> bool {
     supports_color::on_cached(stream).is_some()
@@ -1443,28 +1443,26 @@ fn run_pre_push() {
         );
     }
 
-    println!("{}", "Running pre-push checks...".cyan().bold());
-
     // Set up shared target directory
     let shared_target_dir = get_shared_target_dir();
-    let dir_size_handle: Option<std::thread::JoinHandle<(PathBuf, u64)>> =
-        if let Some(ref target_dir) = shared_target_dir {
-            // Create the directory if it doesn't exist
-            let _ = fs::create_dir_all(target_dir);
 
-            // Set CARGO_TARGET_DIR for all subsequent cargo commands
-            // SAFETY: We're single-threaded at this point, before spawning any cargo commands
-            unsafe { std::env::set_var("CARGO_TARGET_DIR", target_dir) };
+    // Use a channel so we can do non-blocking receive for dir_size
+    let (dir_size_tx, dir_size_rx) = mpsc::channel::<(PathBuf, u64)>();
+    if let Some(ref target_dir) = shared_target_dir {
+        // Create the directory if it doesn't exist
+        let _ = fs::create_dir_all(target_dir);
 
-            // Calculate dir size in background (it's just informational)
-            let target_dir_clone = target_dir.clone();
-            Some(std::thread::spawn(move || {
-                let size = dir_size(&target_dir_clone);
-                (target_dir_clone, size)
-            }))
-        } else {
-            None
-        };
+        // Set CARGO_TARGET_DIR for all subsequent cargo commands
+        // SAFETY: We're single-threaded at this point, before spawning any cargo commands
+        unsafe { std::env::set_var("CARGO_TARGET_DIR", target_dir) };
+
+        // Calculate dir size in background (it's just informational)
+        let target_dir_clone = target_dir.clone();
+        std::thread::spawn(move || {
+            let size = dir_size(&target_dir_clone);
+            let _ = dir_size_tx.send((target_dir_clone, size));
+        });
+    }
 
     // Spawn git fetch in background - we'll check the result at the end
     let fetch_handle = std::thread::spawn(|| {
@@ -1611,9 +1609,10 @@ fn run_pre_push() {
     // Sort for consistent output
     let affected_crates: BTreeSet<_> = affected_crates.into_iter().collect();
 
+    // Print header with affected crates
     println!(
-        "{} Affected crates: {}",
-        "🔍".cyan(),
+        "{} {}",
+        "Pre-push:".cyan().bold(),
         affected_crates
             .iter()
             .map(|s| s.as_str())
@@ -1621,8 +1620,42 @@ fn run_pre_push() {
             .join(", ")
             .yellow()
     );
-
     println!();
+
+    // Create progress tracker with spinners
+    let progress = TaskProgress::new();
+
+    // Create spinners for enabled tasks
+    let clippy_spinner = if config.pre_push.clippy {
+        Some(progress.add_task("clippy"))
+    } else {
+        None
+    };
+    let build_spinner = if config.pre_push.nextest {
+        Some(progress.add_task("build tests"))
+    } else {
+        None
+    };
+    let test_spinner = if config.pre_push.nextest {
+        Some(progress.add_task("run tests"))
+    } else {
+        None
+    };
+    let shear_spinner = if config.pre_push.cargo_shear {
+        Some(progress.add_task("cargo-shear"))
+    } else {
+        None
+    };
+    let doctest_spinner = if config.pre_push.doc_tests {
+        Some(progress.add_task("doc tests"))
+    } else {
+        None
+    };
+    let docs_spinner = if config.pre_push.docs {
+        Some(progress.add_task("docs"))
+    } else {
+        None
+    };
 
     // Type alias for background task results
     type CommandResult = (
@@ -1632,12 +1665,7 @@ fn run_pre_push() {
     );
 
     // 1. Run clippy FIRST - catches most issues quickly
-    if config.pre_push.clippy {
-        print!(
-            "  {} Running clippy for all affected crates... ",
-            "🔍".cyan()
-        );
-        io::stdout().flush().unwrap();
+    if let Some(ref spinner) = clippy_spinner {
         let start = std::time::Instant::now();
         let mut clippy_command = vec!["cargo".to_string(), "clippy".to_string()];
         for crate_name in &affected_crates {
@@ -1663,21 +1691,16 @@ fn run_pre_push() {
             "-D".to_string(),
             "warnings".to_string(),
         ]);
-        let clippy_output = run_command_with_streaming(&clippy_command, &[]);
+
+        let clippy_output = progress.suspend(|| run_command_with_streaming(&clippy_command, &[]));
         let elapsed = start.elapsed();
 
         match clippy_output {
             Ok(output) if output.status.success() => {
-                println!(
-                    "{}",
-                    format!("passed ({:.1}s)", elapsed.as_secs_f32()).green()
-                );
+                spinner.succeed(elapsed.as_secs_f32());
             }
             Ok(output) => {
-                println!(
-                    "{}",
-                    format!("failed ({:.1}s)", elapsed.as_secs_f32()).red()
-                );
+                spinner.fail(elapsed.as_secs_f32());
                 let hint_command = clippy_command.clone();
                 exit_with_command_failure(
                     &clippy_command,
@@ -1687,7 +1710,7 @@ fn run_pre_push() {
                 );
             }
             Err(e) => {
-                println!("{}", "failed".red());
+                spinner.fail(elapsed.as_secs_f32());
                 let hint_command = clippy_command.clone();
                 exit_with_command_error(
                     &clippy_command,
@@ -1701,11 +1724,7 @@ fn run_pre_push() {
 
     // 2. Build nextest tests
     let test_handle: Option<std::thread::JoinHandle<CommandResult>> = if config.pre_push.nextest {
-        print!(
-            "  {} Building tests for all affected crates... ",
-            "🔨".cyan()
-        );
-        io::stdout().flush().unwrap();
+        let build_spinner = build_spinner.as_ref().unwrap();
         let start = std::time::Instant::now();
         let mut build_command = vec![
             "cargo".to_string(),
@@ -1717,31 +1736,25 @@ fn run_pre_push() {
             build_command.push("-p".to_string());
             build_command.push(crate_name.to_string());
         }
-        let build_output = run_command_with_streaming(&build_command, &[]);
+
+        let build_output = progress.suspend(|| run_command_with_streaming(&build_command, &[]));
         let elapsed = start.elapsed();
 
         match build_output {
             Ok(output) if output.status.success() => {
-                println!(
-                    "{}",
-                    format!("passed ({:.1}s)", elapsed.as_secs_f32()).green()
-                );
+                build_spinner.succeed(elapsed.as_secs_f32());
             }
             Ok(output) => {
-                println!(
-                    "{}",
-                    format!("failed ({:.1}s)", elapsed.as_secs_f32()).red()
-                );
+                build_spinner.fail(elapsed.as_secs_f32());
                 exit_with_command_failure(&build_command, &[], output, None);
             }
             Err(e) => {
-                println!("{}", "failed".red());
+                build_spinner.fail(elapsed.as_secs_f32());
                 exit_with_command_error(&build_command, &[], e, None);
             }
         }
 
         // 3. Spawn test runner in background
-        println!("  {} Running tests in background...", "🧪".cyan());
         let mut run_command = vec![
             "cargo".to_string(),
             "nextest".to_string(),
@@ -1773,7 +1786,6 @@ fn run_pre_push() {
     // 3. Spawn cargo-shear in background (doesn't need cargo lock)
     let shear_handle: Option<std::thread::JoinHandle<CommandResult>> =
         if config.pre_push.cargo_shear {
-            println!("  {} Running cargo-shear in background...", "✂️".cyan());
             let handle = std::thread::spawn(move || {
                 let start = std::time::Instant::now();
                 let shear_command = vec!["cargo".to_string(), "shear".to_string()];
@@ -1793,12 +1805,7 @@ fn run_pre_push() {
         };
 
     // 4. Run doc tests (while tests run in background)
-    if config.pre_push.doc_tests {
-        print!(
-            "  {} Running doc tests for all affected crates... ",
-            "📚".cyan()
-        );
-        io::stdout().flush().unwrap();
+    if let Some(ref spinner) = doctest_spinner {
         let start = std::time::Instant::now();
         let mut doctest_command =
             vec!["cargo".to_string(), "test".to_string(), "--doc".to_string()];
@@ -1819,40 +1826,30 @@ fn run_pre_push() {
                 // Empty features list means no extra features
             }
         }
-        let doctest_output = run_command_with_streaming(&doctest_command, &[]);
+
+        let doctest_output = progress.suspend(|| run_command_with_streaming(&doctest_command, &[]));
         let elapsed = start.elapsed();
 
         match doctest_output {
             Ok(output) if output.status.success() => {
-                println!(
-                    "{}",
-                    format!("passed ({:.1}s)", elapsed.as_secs_f32()).green()
-                );
+                spinner.succeed(elapsed.as_secs_f32());
             }
             Ok(output) if should_skip_doc_tests(&output) => {
-                println!("{}", "skipped (no lib)".yellow());
+                spinner.skip("no lib");
             }
             Ok(output) => {
-                println!(
-                    "{}",
-                    format!("failed ({:.1}s)", elapsed.as_secs_f32()).red()
-                );
+                spinner.fail(elapsed.as_secs_f32());
                 exit_with_command_failure(&doctest_command, &[], output, None);
             }
             Err(e) => {
-                println!("{}", "failed".red());
+                spinner.fail(elapsed.as_secs_f32());
                 exit_with_command_error(&doctest_command, &[], e, None);
             }
         }
     }
 
     // 5. Build docs (while tests run in background)
-    if config.pre_push.docs {
-        print!(
-            "  {} Building docs for all affected crates... ",
-            "📖".cyan()
-        );
-        io::stdout().flush().unwrap();
+    if let Some(ref spinner) = docs_spinner {
         let start = std::time::Instant::now();
         let mut doc_command = vec![
             "cargo".to_string(),
@@ -1889,20 +1886,14 @@ fn run_pre_push() {
 
         match doc_output {
             Ok(output) if output.status.success() => {
-                println!(
-                    "{}",
-                    format!("passed ({:.1}s)", elapsed.as_secs_f32()).green()
-                );
+                spinner.succeed(elapsed.as_secs_f32());
             }
             Ok(output) => {
-                println!(
-                    "{}",
-                    format!("failed ({:.1}s)", elapsed.as_secs_f32()).red()
-                );
+                spinner.fail(elapsed.as_secs_f32());
                 exit_with_command_failure(&doc_command, &doc_env, output, None);
             }
             Err(e) => {
-                println!("{}", "failed".red());
+                spinner.fail(elapsed.as_secs_f32());
                 exit_with_command_error(&doc_command, &doc_env, e, None);
             }
         }
@@ -1910,29 +1901,18 @@ fn run_pre_push() {
 
     // 6. Wait for cargo-shear background task
     if let Some(handle) = shear_handle {
-        print!("  {} Waiting for cargo-shear... ", "✂️".cyan());
-        io::stdout().flush().unwrap();
+        let spinner = shear_spinner.as_ref().unwrap();
 
         match handle.join() {
             Ok((shear_command, output_result, elapsed)) => match output_result {
                 Ok(output) if output.status.success() => {
-                    println!(
-                        "{}",
-                        format!("passed ({:.1}s)", elapsed.as_secs_f32()).green()
-                    );
+                    spinner.succeed(elapsed.as_secs_f32());
                 }
                 Ok(output) if indicates_missing_cargo_subcommand(&output, "shear") => {
-                    println!("{}", "skipped (not installed)".yellow());
-                    println!(
-                        "    {} Install with: cargo binstall cargo-shear",
-                        "💡".cyan()
-                    );
+                    spinner.skip("not installed");
                 }
                 Ok(output) => {
-                    println!(
-                        "{}",
-                        format!("failed ({:.1}s)", elapsed.as_secs_f32()).red()
-                    );
+                    spinner.fail(elapsed.as_secs_f32());
                     exit_with_command_failure(
                         &shear_command,
                         &[],
@@ -1941,12 +1921,13 @@ fn run_pre_push() {
                     );
                 }
                 Err(e) => {
-                    println!("{}", "failed".red());
+                    spinner.fail(elapsed.as_secs_f32());
                     exit_with_command_error(&shear_command, &[], e, None);
                 }
             },
             Err(_) => {
-                println!("{}", "failed (thread panicked)".red());
+                spinner.fail(0.0);
+                error!("cargo-shear thread panicked");
                 std::process::exit(1);
             }
         }
@@ -1954,58 +1935,48 @@ fn run_pre_push() {
 
     // 7. Wait for background test results
     if let Some(handle) = test_handle {
-        print!("  {} Waiting for test results... ", "🧪".cyan());
-        io::stdout().flush().unwrap();
+        let spinner = test_spinner.as_ref().unwrap();
 
         match handle.join() {
             Ok((run_command, output_result, elapsed)) => match output_result {
                 Ok(output) if output.status.success() => {
-                    println!(
-                        "{}",
-                        format!("passed ({:.1}s)", elapsed.as_secs_f32()).green()
-                    );
+                    spinner.succeed(elapsed.as_secs_f32());
                 }
                 Ok(output) => {
-                    println!(
-                        "{}",
-                        format!("failed ({:.1}s)", elapsed.as_secs_f32()).red()
-                    );
+                    spinner.fail(elapsed.as_secs_f32());
                     exit_with_command_failure(&run_command, &[], output, None);
                 }
                 Err(e) => {
-                    println!("{}", "failed".red());
+                    spinner.fail(elapsed.as_secs_f32());
                     exit_with_command_error(&run_command, &[], e, None);
                 }
             },
             Err(_) => {
-                println!("{}", "failed (thread panicked)".red());
+                spinner.fail(0.0);
+                error!("test runner thread panicked");
                 std::process::exit(1);
             }
         }
     }
 
     println!();
-    println!(
-        "{} {}",
-        "✅".green(),
-        "All pre-push checks passed!".green().bold()
-    );
+    println!("{} {}", "✅".green(), "All checks passed!".green().bold());
 
-    // Print shared target dir size (informational, from background thread)
-    if let Some(handle) = dir_size_handle {
-        if let Ok((target_dir, size)) = handle.join() {
+    // Print shared target dir size (non-blocking check)
+    if shared_target_dir.is_some() {
+        // Try to receive with a short timeout - don't block if still calculating
+        if let Ok((target_dir, size)) = dir_size_rx.recv_timeout(Duration::from_millis(100)) {
             println!(
-                "  {} Shared target dir: {} ({})",
-                "📦".cyan(),
+                "   {} {} ({})",
+                "Target:".dimmed(),
                 target_dir.display().to_string().blue(),
-                format_size(size).yellow()
+                format_size(size).dimmed()
             );
         }
     }
 
     // Now check if we need to rebase (git fetch was running in background)
-    println!();
-    print!("  {} Checking origin/main... ", "⬇️".cyan());
+    print!("   {} ", "Branch:".dimmed());
     io::stdout().flush().unwrap();
 
     let fetch_failed = match fetch_handle.join() {
@@ -2079,7 +2050,7 @@ fn run_pre_push() {
         std::process::exit(1);
     }
 
-    println!("{}", "up to date".green());
+    println!("{}", "up to date with origin/main".dimmed());
     std::process::exit(0);
 }
 
