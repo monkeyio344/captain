@@ -8,15 +8,18 @@ use std::{
     borrow::Cow,
     ffi::OsStr,
     fs,
-    io::{self, BufRead, BufReader, Write},
+    io::{self, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use supports_color::{self, Stream as ColorStream};
 use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
 
 mod readme;
+mod utils;
+
+use utils::{TaskProgress, dir_size, format_size, run_command_with_spinner};
 
 fn terminal_supports_color(stream: ColorStream) -> bool {
     supports_color::on_cached(stream).is_some()
@@ -27,14 +30,6 @@ fn maybe_strip_bytes<'a>(data: &'a [u8], stream: ColorStream) -> Cow<'a, [u8]> {
         Cow::Borrowed(data)
     } else {
         Cow::Owned(strip_ansi_escapes::strip(data))
-    }
-}
-
-fn maybe_strip_str<'a>(line: &'a str, stream: ColorStream) -> Cow<'a, str> {
-    if terminal_supports_color(stream) {
-        Cow::Borrowed(line)
-    } else {
-        Cow::Owned(strip_ansi_escapes::strip_str(line))
     }
 }
 
@@ -1159,143 +1154,6 @@ fn should_skip_doc_tests(output: &std::process::Output) -> bool {
         || stderr.contains("no library targets found")
 }
 
-/// Runs a command with smart streaming behavior:
-/// - Shows elapsed time from the start
-/// - Buffers output for the first 5 seconds
-/// - If command completes within 5s, returns without printing
-/// - If it takes >5s, starts streaming output in real-time
-/// - Updates elapsed time every second during execution
-fn run_command_with_streaming(
-    command: &[String],
-    envs: &[(&str, &str)],
-) -> Result<std::process::Output, std::io::Error> {
-    let mut cmd = command_with_color(&command[0]);
-    for arg in &command[1..] {
-        cmd.arg(arg);
-    }
-    for (key, value) in envs {
-        cmd.env(key, value);
-    }
-
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-
-    let mut child = cmd.spawn()?;
-
-    let stdout = child.stdout.take().expect("Failed to capture stdout");
-    let stderr = child.stderr.take().expect("Failed to capture stderr");
-
-    let start_time = Instant::now();
-    let threshold = Duration::from_secs(5);
-
-    // Channels to collect output
-    let (stdout_tx, stdout_rx) = mpsc::channel::<String>();
-    let (stderr_tx, stderr_rx) = mpsc::channel::<String>();
-
-    // Spawn threads to read stdout and stderr
-    let stdout_thread = std::thread::spawn(move || {
-        let reader = BufReader::new(stdout);
-        for line in reader.lines().map_while(Result::ok) {
-            let _ = stdout_tx.send(line);
-        }
-    });
-
-    let stderr_thread = std::thread::spawn(move || {
-        let reader = BufReader::new(stderr);
-        for line in reader.lines().map_while(Result::ok) {
-            let _ = stderr_tx.send(line);
-        }
-    });
-
-    // Collect output and decide when to start streaming
-    let mut stdout_buffer = Vec::new();
-    let mut stderr_buffer = Vec::new();
-    let mut streaming = false;
-
-    loop {
-        // Check if process has exited
-        match child.try_wait()? {
-            Some(status) => {
-                // Process has finished, collect remaining output
-                while let Ok(line) = stdout_rx.try_recv() {
-                    if streaming {
-                        println!("{}", maybe_strip_str(&line, ColorStream::Stdout));
-                    }
-                    stdout_buffer.push(line);
-                }
-                while let Ok(line) = stderr_rx.try_recv() {
-                    if streaming {
-                        eprintln!("{}", maybe_strip_str(&line, ColorStream::Stderr));
-                    }
-                    stderr_buffer.push(line);
-                }
-
-                // Wait for reader threads to finish
-                let _ = stdout_thread.join();
-                let _ = stderr_thread.join();
-
-                // If we were streaming, print a newline for clean output
-                if streaming {
-                    println!();
-                }
-
-                // Reconstruct output
-                let stdout_bytes = stdout_buffer.join("\n").into_bytes();
-                let stderr_bytes = stderr_buffer.join("\n").into_bytes();
-
-                return Ok(std::process::Output {
-                    status,
-                    stdout: stdout_bytes,
-                    stderr: stderr_bytes,
-                });
-            }
-            None => {
-                // Process is still running
-                let elapsed = start_time.elapsed();
-
-                // Check if we should start streaming
-                if !streaming && elapsed >= threshold {
-                    streaming = true;
-                    // Print the elapsed time indicator
-                    println!(
-                        "  {} Taking longer than expected, streaming output...",
-                        "⏱️".yellow()
-                    );
-                    // Flush buffered output
-                    for line in &stdout_buffer {
-                        println!("{}", maybe_strip_str(line, ColorStream::Stdout));
-                    }
-                    for line in &stderr_buffer {
-                        eprintln!("{}", maybe_strip_str(line, ColorStream::Stderr));
-                    }
-                }
-
-                // Collect new output
-                let mut got_output = false;
-                while let Ok(line) = stdout_rx.try_recv() {
-                    if streaming {
-                        println!("{}", maybe_strip_str(&line, ColorStream::Stdout));
-                    }
-                    stdout_buffer.push(line);
-                    got_output = true;
-                }
-                while let Ok(line) = stderr_rx.try_recv() {
-                    if streaming {
-                        eprintln!("{}", maybe_strip_str(&line, ColorStream::Stderr));
-                    }
-                    stderr_buffer.push(line);
-                    got_output = true;
-                }
-
-                // Sleep briefly to avoid busy-waiting
-                if !got_output {
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-            }
-        }
-    }
-}
-
 fn debug_packages() {
     use std::collections::HashSet;
 
@@ -1380,43 +1238,6 @@ fn get_shared_target_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".captain").join("target"))
 }
 
-/// Calculate directory size recursively (returns bytes)
-fn dir_size(path: &Path) -> u64 {
-    if !path.exists() {
-        return 0;
-    }
-
-    let mut size = 0u64;
-    if let Ok(entries) = fs::read_dir(path) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                size += dir_size(&path);
-            } else if let Ok(meta) = entry.metadata() {
-                size += meta.len();
-            }
-        }
-    }
-    size
-}
-
-/// Format bytes as human-readable size
-fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{} B", bytes)
-    }
-}
-
 fn run_pre_push() {
     use std::collections::{BTreeSet, HashSet};
 
@@ -1477,29 +1298,28 @@ fn run_pre_push() {
         );
     }
 
-    println!("{}", "Running pre-push checks...".cyan().bold());
-
     // Set up shared target directory
     let shared_target_dir = get_shared_target_dir();
+
+    // Use a channel so we can do non-blocking receive for dir_size
+    let (dir_size_tx, dir_size_rx) = mpsc::channel::<(PathBuf, u64)>();
     if let Some(ref target_dir) = shared_target_dir {
         // Create the directory if it doesn't exist
         let _ = fs::create_dir_all(target_dir);
 
-        let size = dir_size(target_dir);
-        println!(
-            "  {} Using shared target dir: {} ({})",
-            "📦".cyan(),
-            target_dir.display().to_string().blue(),
-            format_size(size).yellow()
-        );
-
         // Set CARGO_TARGET_DIR for all subsequent cargo commands
         // SAFETY: We're single-threaded at this point, before spawning any cargo commands
         unsafe { std::env::set_var("CARGO_TARGET_DIR", target_dir) };
+
+        // Calculate dir size in background (it's just informational)
+        let target_dir_clone = target_dir.clone();
+        std::thread::spawn(move || {
+            let size = dir_size(&target_dir_clone);
+            let _ = dir_size_tx.send((target_dir_clone, size));
+        });
     }
 
-    // Spawn git fetch in background - we'll check the result later
-    println!("  {} Fetching origin/main in background...", "⬇️".cyan());
+    // Spawn git fetch in background - we'll check the result at the end
     let fetch_handle = std::thread::spawn(|| {
         Command::new("git")
             .args(["fetch", "origin", "main"])
@@ -1561,78 +1381,7 @@ fn run_pre_push() {
         .map(|pkg| pkg.name.to_string())
         .collect();
 
-    // Wait for git fetch to complete before we use origin/main
-    match fetch_handle.join() {
-        Ok(Ok(output)) if !output.status.success() => {
-            error!(
-                "Failed to fetch from origin: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            std::process::exit(1);
-        }
-        Ok(Err(e)) => {
-            error!("Failed to run git fetch: {}", e);
-            std::process::exit(1);
-        }
-        Err(_) => {
-            error!("git fetch thread panicked");
-            std::process::exit(1);
-        }
-        Ok(Ok(_)) => {} // Success
-    }
-
-    // Check if current branch is fast-forward to origin/main
-    let merge_base_output = command_with_color("git")
-        .args(["merge-base", "HEAD", "origin/main"])
-        .output();
-
-    let merge_base = match merge_base_output {
-        Ok(output) if output.status.success() => {
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
-        }
-        _ => {
-            error!("Failed to find merge base with origin/main");
-            std::process::exit(1);
-        }
-    };
-
-    // Get current HEAD
-    let head_output = command_with_color("git")
-        .args(["rev-parse", "HEAD"])
-        .output();
-
-    let head = match head_output {
-        Ok(output) if output.status.success() => {
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
-        }
-        _ => {
-            error!("Failed to get HEAD");
-            std::process::exit(1);
-        }
-    };
-
-    // If merge-base != origin/main, we have non-fast-forward changes
-    if merge_base != head {
-        // Check if origin/main is ahead of merge_base
-        let origin_main = "origin/main";
-        let ahead_check = command_with_color("git")
-            .args(["rev-parse", origin_main])
-            .output();
-
-        if let Ok(output) = ahead_check {
-            if output.status.success() {
-                let origin_main_rev = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if origin_main_rev != merge_base {
-                    error!("Your branch has diverged from origin/main");
-                    error!("Please rebase your changes:");
-                    error!("  git rebase origin/main");
-                    std::process::exit(1);
-                }
-            }
-        }
-    }
-
-    // Get the list of changed files between origin/main and HEAD
+    // Get the list of changed files between origin/main and HEAD (using cached ref)
     let mut changed_files: std::collections::BTreeSet<String> = BTreeSet::new();
 
     let diff_output = command_with_color("git")
@@ -1715,9 +1464,10 @@ fn run_pre_push() {
     // Sort for consistent output
     let affected_crates: BTreeSet<_> = affected_crates.into_iter().collect();
 
+    // Print header with affected crates
     println!(
-        "{} Affected crates: {}",
-        "🔍".cyan(),
+        "{} {}",
+        "Pre-push:".cyan().bold(),
         affected_crates
             .iter()
             .map(|s| s.as_str())
@@ -1725,8 +1475,42 @@ fn run_pre_push() {
             .join(", ")
             .yellow()
     );
-
     println!();
+
+    // Create progress tracker with spinners
+    let progress = TaskProgress::new();
+
+    // Create spinners for enabled tasks
+    let clippy_spinner = if config.pre_push.clippy {
+        Some(progress.add_task("clippy"))
+    } else {
+        None
+    };
+    let build_spinner = if config.pre_push.nextest {
+        Some(progress.add_task("build tests"))
+    } else {
+        None
+    };
+    let test_spinner = if config.pre_push.nextest {
+        Some(progress.add_task("run tests"))
+    } else {
+        None
+    };
+    let shear_spinner = if config.pre_push.cargo_shear {
+        Some(progress.add_task("cargo-shear"))
+    } else {
+        None
+    };
+    let doctest_spinner = if config.pre_push.doc_tests {
+        Some(progress.add_task("doc tests"))
+    } else {
+        None
+    };
+    let docs_spinner = if config.pre_push.docs {
+        Some(progress.add_task("docs"))
+    } else {
+        None
+    };
 
     // Type alias for background task results
     type CommandResult = (
@@ -1736,12 +1520,7 @@ fn run_pre_push() {
     );
 
     // 1. Run clippy FIRST - catches most issues quickly
-    if config.pre_push.clippy {
-        print!(
-            "  {} Running clippy for all affected crates... ",
-            "🔍".cyan()
-        );
-        io::stdout().flush().unwrap();
+    if let Some(ref spinner) = clippy_spinner {
         let start = std::time::Instant::now();
         let mut clippy_command = vec!["cargo".to_string(), "clippy".to_string()];
         for crate_name in &affected_crates {
@@ -1767,21 +1546,16 @@ fn run_pre_push() {
             "-D".to_string(),
             "warnings".to_string(),
         ]);
-        let clippy_output = run_command_with_streaming(&clippy_command, &[]);
+
+        let clippy_output = run_command_with_spinner(&clippy_command, &[], spinner);
         let elapsed = start.elapsed();
 
         match clippy_output {
             Ok(output) if output.status.success() => {
-                println!(
-                    "{}",
-                    format!("passed ({:.1}s)", elapsed.as_secs_f32()).green()
-                );
+                spinner.succeed(elapsed.as_secs_f32());
             }
             Ok(output) => {
-                println!(
-                    "{}",
-                    format!("failed ({:.1}s)", elapsed.as_secs_f32()).red()
-                );
+                spinner.fail(elapsed.as_secs_f32());
                 let hint_command = clippy_command.clone();
                 exit_with_command_failure(
                     &clippy_command,
@@ -1791,7 +1565,7 @@ fn run_pre_push() {
                 );
             }
             Err(e) => {
-                println!("{}", "failed".red());
+                spinner.fail(elapsed.as_secs_f32());
                 let hint_command = clippy_command.clone();
                 exit_with_command_error(
                     &clippy_command,
@@ -1805,11 +1579,7 @@ fn run_pre_push() {
 
     // 2. Build nextest tests
     let test_handle: Option<std::thread::JoinHandle<CommandResult>> = if config.pre_push.nextest {
-        print!(
-            "  {} Building tests for all affected crates... ",
-            "🔨".cyan()
-        );
-        io::stdout().flush().unwrap();
+        let build_spinner = build_spinner.as_ref().unwrap();
         let start = std::time::Instant::now();
         let mut build_command = vec![
             "cargo".to_string(),
@@ -1821,31 +1591,25 @@ fn run_pre_push() {
             build_command.push("-p".to_string());
             build_command.push(crate_name.to_string());
         }
-        let build_output = run_command_with_streaming(&build_command, &[]);
+
+        let build_output = run_command_with_spinner(&build_command, &[], build_spinner);
         let elapsed = start.elapsed();
 
         match build_output {
             Ok(output) if output.status.success() => {
-                println!(
-                    "{}",
-                    format!("passed ({:.1}s)", elapsed.as_secs_f32()).green()
-                );
+                build_spinner.succeed(elapsed.as_secs_f32());
             }
             Ok(output) => {
-                println!(
-                    "{}",
-                    format!("failed ({:.1}s)", elapsed.as_secs_f32()).red()
-                );
+                build_spinner.fail(elapsed.as_secs_f32());
                 exit_with_command_failure(&build_command, &[], output, None);
             }
             Err(e) => {
-                println!("{}", "failed".red());
+                build_spinner.fail(elapsed.as_secs_f32());
                 exit_with_command_error(&build_command, &[], e, None);
             }
         }
 
         // 3. Spawn test runner in background
-        println!("  {} Running tests in background...", "🧪".cyan());
         let mut run_command = vec![
             "cargo".to_string(),
             "nextest".to_string(),
@@ -1877,7 +1641,6 @@ fn run_pre_push() {
     // 3. Spawn cargo-shear in background (doesn't need cargo lock)
     let shear_handle: Option<std::thread::JoinHandle<CommandResult>> =
         if config.pre_push.cargo_shear {
-            println!("  {} Running cargo-shear in background...", "✂️".cyan());
             let handle = std::thread::spawn(move || {
                 let start = std::time::Instant::now();
                 let shear_command = vec!["cargo".to_string(), "shear".to_string()];
@@ -1897,12 +1660,7 @@ fn run_pre_push() {
         };
 
     // 4. Run doc tests (while tests run in background)
-    if config.pre_push.doc_tests {
-        print!(
-            "  {} Running doc tests for all affected crates... ",
-            "📚".cyan()
-        );
-        io::stdout().flush().unwrap();
+    if let Some(ref spinner) = doctest_spinner {
         let start = std::time::Instant::now();
         let mut doctest_command =
             vec!["cargo".to_string(), "test".to_string(), "--doc".to_string()];
@@ -1923,40 +1681,31 @@ fn run_pre_push() {
                 // Empty features list means no extra features
             }
         }
-        let doctest_output = run_command_with_streaming(&doctest_command, &[]);
+
+        let doctest_output = run_command_with_spinner(&doctest_command, &[], spinner);
         let elapsed = start.elapsed();
 
         match doctest_output {
             Ok(output) if output.status.success() => {
-                println!(
-                    "{}",
-                    format!("passed ({:.1}s)", elapsed.as_secs_f32()).green()
-                );
+                spinner.succeed(elapsed.as_secs_f32());
             }
             Ok(output) if should_skip_doc_tests(&output) => {
-                println!("{}", "skipped (no lib)".yellow());
+                // No lib to test - just hide this task
+                spinner.clear();
             }
             Ok(output) => {
-                println!(
-                    "{}",
-                    format!("failed ({:.1}s)", elapsed.as_secs_f32()).red()
-                );
+                spinner.fail(elapsed.as_secs_f32());
                 exit_with_command_failure(&doctest_command, &[], output, None);
             }
             Err(e) => {
-                println!("{}", "failed".red());
+                spinner.fail(elapsed.as_secs_f32());
                 exit_with_command_error(&doctest_command, &[], e, None);
             }
         }
     }
 
     // 5. Build docs (while tests run in background)
-    if config.pre_push.docs {
-        print!(
-            "  {} Building docs for all affected crates... ",
-            "📖".cyan()
-        );
-        io::stdout().flush().unwrap();
+    if let Some(ref spinner) = docs_spinner {
         let start = std::time::Instant::now();
         let mut doc_command = vec![
             "cargo".to_string(),
@@ -1993,20 +1742,14 @@ fn run_pre_push() {
 
         match doc_output {
             Ok(output) if output.status.success() => {
-                println!(
-                    "{}",
-                    format!("passed ({:.1}s)", elapsed.as_secs_f32()).green()
-                );
+                spinner.succeed(elapsed.as_secs_f32());
             }
             Ok(output) => {
-                println!(
-                    "{}",
-                    format!("failed ({:.1}s)", elapsed.as_secs_f32()).red()
-                );
+                spinner.fail(elapsed.as_secs_f32());
                 exit_with_command_failure(&doc_command, &doc_env, output, None);
             }
             Err(e) => {
-                println!("{}", "failed".red());
+                spinner.fail(elapsed.as_secs_f32());
                 exit_with_command_error(&doc_command, &doc_env, e, None);
             }
         }
@@ -2014,29 +1757,18 @@ fn run_pre_push() {
 
     // 6. Wait for cargo-shear background task
     if let Some(handle) = shear_handle {
-        print!("  {} Waiting for cargo-shear... ", "✂️".cyan());
-        io::stdout().flush().unwrap();
+        let spinner = shear_spinner.as_ref().unwrap();
 
         match handle.join() {
             Ok((shear_command, output_result, elapsed)) => match output_result {
                 Ok(output) if output.status.success() => {
-                    println!(
-                        "{}",
-                        format!("passed ({:.1}s)", elapsed.as_secs_f32()).green()
-                    );
+                    spinner.succeed(elapsed.as_secs_f32());
                 }
                 Ok(output) if indicates_missing_cargo_subcommand(&output, "shear") => {
-                    println!("{}", "skipped (not installed)".yellow());
-                    println!(
-                        "    {} Install with: cargo binstall cargo-shear",
-                        "💡".cyan()
-                    );
+                    spinner.skip("not installed");
                 }
                 Ok(output) => {
-                    println!(
-                        "{}",
-                        format!("failed ({:.1}s)", elapsed.as_secs_f32()).red()
-                    );
+                    spinner.fail(elapsed.as_secs_f32());
                     exit_with_command_failure(
                         &shear_command,
                         &[],
@@ -2045,12 +1777,13 @@ fn run_pre_push() {
                     );
                 }
                 Err(e) => {
-                    println!("{}", "failed".red());
+                    spinner.fail(elapsed.as_secs_f32());
                     exit_with_command_error(&shear_command, &[], e, None);
                 }
             },
             Err(_) => {
-                println!("{}", "failed (thread panicked)".red());
+                spinner.fail(0.0);
+                error!("cargo-shear thread panicked");
                 std::process::exit(1);
             }
         }
@@ -2058,42 +1791,122 @@ fn run_pre_push() {
 
     // 7. Wait for background test results
     if let Some(handle) = test_handle {
-        print!("  {} Waiting for test results... ", "🧪".cyan());
-        io::stdout().flush().unwrap();
+        let spinner = test_spinner.as_ref().unwrap();
 
         match handle.join() {
             Ok((run_command, output_result, elapsed)) => match output_result {
                 Ok(output) if output.status.success() => {
-                    println!(
-                        "{}",
-                        format!("passed ({:.1}s)", elapsed.as_secs_f32()).green()
-                    );
+                    spinner.succeed(elapsed.as_secs_f32());
                 }
                 Ok(output) => {
-                    println!(
-                        "{}",
-                        format!("failed ({:.1}s)", elapsed.as_secs_f32()).red()
-                    );
+                    spinner.fail(elapsed.as_secs_f32());
                     exit_with_command_failure(&run_command, &[], output, None);
                 }
                 Err(e) => {
-                    println!("{}", "failed".red());
+                    spinner.fail(elapsed.as_secs_f32());
                     exit_with_command_error(&run_command, &[], e, None);
                 }
             },
             Err(_) => {
-                println!("{}", "failed (thread panicked)".red());
+                spinner.fail(0.0);
+                error!("test runner thread panicked");
                 std::process::exit(1);
             }
         }
     }
 
     println!();
-    println!(
-        "{} {}",
-        "✅".green(),
-        "All pre-push checks passed!".green().bold()
-    );
+    println!("{} {}", "✅".green(), "All checks passed!".green().bold());
+
+    // Print shared target dir size (non-blocking check)
+    if shared_target_dir.is_some() {
+        // Try to receive with a short timeout - don't block if still calculating
+        if let Ok((target_dir, size)) = dir_size_rx.recv_timeout(Duration::from_millis(100)) {
+            println!(
+                "   {} {} ({})",
+                "Target:".dimmed(),
+                target_dir.display().to_string().blue(),
+                format_size(size).dimmed()
+            );
+        }
+    }
+
+    // Now check if we need to rebase (git fetch was running in background)
+    print!("   {} ", "Branch:".dimmed());
+    io::stdout().flush().unwrap();
+
+    let fetch_failed = match fetch_handle.join() {
+        Ok(Ok(output)) if !output.status.success() => {
+            println!("{}", "fetch failed".red());
+            error!(
+                "Failed to fetch from origin: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            true
+        }
+        Ok(Err(e)) => {
+            println!("{}", "fetch failed".red());
+            error!("Failed to run git fetch: {}", e);
+            true
+        }
+        Err(_) => {
+            println!("{}", "fetch failed".red());
+            error!("git fetch thread panicked");
+            true
+        }
+        Ok(Ok(_)) => false, // Success
+    };
+
+    if fetch_failed {
+        std::process::exit(1);
+    }
+
+    // Check if current branch is fast-forward to origin/main
+    let merge_base_output = command_with_color("git")
+        .args(["merge-base", "HEAD", "origin/main"])
+        .output();
+
+    let merge_base = match merge_base_output {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+        _ => {
+            println!("{}", "failed".red());
+            error!("Failed to find merge base with origin/main");
+            std::process::exit(1);
+        }
+    };
+
+    // Get origin/main rev
+    let origin_main_rev = match command_with_color("git")
+        .args(["rev-parse", "origin/main"])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+        _ => {
+            println!("{}", "failed".red());
+            error!("Failed to get origin/main revision");
+            std::process::exit(1);
+        }
+    };
+
+    // Check if origin/main is ahead of merge_base (meaning we need to rebase)
+    if origin_main_rev != merge_base {
+        println!("{}", "rebase needed".yellow());
+        println!();
+        println!(
+            "{} {}",
+            "⚠️".yellow(),
+            "Your branch has diverged from origin/main".yellow().bold()
+        );
+        println!("  Please rebase your changes and push again:");
+        println!("    {}", "git rebase origin/main".cyan());
+        std::process::exit(1);
+    }
+
+    println!("{}", "up to date with origin/main".dimmed());
     std::process::exit(0);
 }
 
