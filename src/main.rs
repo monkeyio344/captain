@@ -17,6 +17,9 @@ use supports_color::{self, Stream as ColorStream};
 use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
 
 mod readme;
+mod utils;
+
+use utils::{dir_size, format_size};
 
 fn terminal_supports_color(stream: ColorStream) -> bool {
     supports_color::on_cached(stream).is_some()
@@ -1380,43 +1383,6 @@ fn get_shared_target_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".captain").join("target"))
 }
 
-/// Calculate directory size recursively (returns bytes)
-fn dir_size(path: &Path) -> u64 {
-    if !path.exists() {
-        return 0;
-    }
-
-    let mut size = 0u64;
-    if let Ok(entries) = fs::read_dir(path) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                size += dir_size(&path);
-            } else if let Ok(meta) = entry.metadata() {
-                size += meta.len();
-            }
-        }
-    }
-    size
-}
-
-/// Format bytes as human-readable size
-fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{} B", bytes)
-    }
-}
-
 fn run_pre_push() {
     use std::collections::{BTreeSet, HashSet};
 
@@ -1481,25 +1447,26 @@ fn run_pre_push() {
 
     // Set up shared target directory
     let shared_target_dir = get_shared_target_dir();
-    if let Some(ref target_dir) = shared_target_dir {
-        // Create the directory if it doesn't exist
-        let _ = fs::create_dir_all(target_dir);
+    let dir_size_handle: Option<std::thread::JoinHandle<(PathBuf, u64)>> =
+        if let Some(ref target_dir) = shared_target_dir {
+            // Create the directory if it doesn't exist
+            let _ = fs::create_dir_all(target_dir);
 
-        let size = dir_size(target_dir);
-        println!(
-            "  {} Using shared target dir: {} ({})",
-            "📦".cyan(),
-            target_dir.display().to_string().blue(),
-            format_size(size).yellow()
-        );
+            // Set CARGO_TARGET_DIR for all subsequent cargo commands
+            // SAFETY: We're single-threaded at this point, before spawning any cargo commands
+            unsafe { std::env::set_var("CARGO_TARGET_DIR", target_dir) };
 
-        // Set CARGO_TARGET_DIR for all subsequent cargo commands
-        // SAFETY: We're single-threaded at this point, before spawning any cargo commands
-        unsafe { std::env::set_var("CARGO_TARGET_DIR", target_dir) };
-    }
+            // Calculate dir size in background (it's just informational)
+            let target_dir_clone = target_dir.clone();
+            Some(std::thread::spawn(move || {
+                let size = dir_size(&target_dir_clone);
+                (target_dir_clone, size)
+            }))
+        } else {
+            None
+        };
 
-    // Spawn git fetch in background - we'll check the result later
-    println!("  {} Fetching origin/main in background...", "⬇️".cyan());
+    // Spawn git fetch in background - we'll check the result at the end
     let fetch_handle = std::thread::spawn(|| {
         Command::new("git")
             .args(["fetch", "origin", "main"])
@@ -1561,78 +1528,7 @@ fn run_pre_push() {
         .map(|pkg| pkg.name.to_string())
         .collect();
 
-    // Wait for git fetch to complete before we use origin/main
-    match fetch_handle.join() {
-        Ok(Ok(output)) if !output.status.success() => {
-            error!(
-                "Failed to fetch from origin: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            std::process::exit(1);
-        }
-        Ok(Err(e)) => {
-            error!("Failed to run git fetch: {}", e);
-            std::process::exit(1);
-        }
-        Err(_) => {
-            error!("git fetch thread panicked");
-            std::process::exit(1);
-        }
-        Ok(Ok(_)) => {} // Success
-    }
-
-    // Check if current branch is fast-forward to origin/main
-    let merge_base_output = command_with_color("git")
-        .args(["merge-base", "HEAD", "origin/main"])
-        .output();
-
-    let merge_base = match merge_base_output {
-        Ok(output) if output.status.success() => {
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
-        }
-        _ => {
-            error!("Failed to find merge base with origin/main");
-            std::process::exit(1);
-        }
-    };
-
-    // Get current HEAD
-    let head_output = command_with_color("git")
-        .args(["rev-parse", "HEAD"])
-        .output();
-
-    let head = match head_output {
-        Ok(output) if output.status.success() => {
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
-        }
-        _ => {
-            error!("Failed to get HEAD");
-            std::process::exit(1);
-        }
-    };
-
-    // If merge-base != origin/main, we have non-fast-forward changes
-    if merge_base != head {
-        // Check if origin/main is ahead of merge_base
-        let origin_main = "origin/main";
-        let ahead_check = command_with_color("git")
-            .args(["rev-parse", origin_main])
-            .output();
-
-        if let Ok(output) = ahead_check {
-            if output.status.success() {
-                let origin_main_rev = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if origin_main_rev != merge_base {
-                    error!("Your branch has diverged from origin/main");
-                    error!("Please rebase your changes:");
-                    error!("  git rebase origin/main");
-                    std::process::exit(1);
-                }
-            }
-        }
-    }
-
-    // Get the list of changed files between origin/main and HEAD
+    // Get the list of changed files between origin/main and HEAD (using cached ref)
     let mut changed_files: std::collections::BTreeSet<String> = BTreeSet::new();
 
     let diff_output = command_with_color("git")
@@ -2094,6 +1990,96 @@ fn run_pre_push() {
         "✅".green(),
         "All pre-push checks passed!".green().bold()
     );
+
+    // Print shared target dir size (informational, from background thread)
+    if let Some(handle) = dir_size_handle {
+        if let Ok((target_dir, size)) = handle.join() {
+            println!(
+                "  {} Shared target dir: {} ({})",
+                "📦".cyan(),
+                target_dir.display().to_string().blue(),
+                format_size(size).yellow()
+            );
+        }
+    }
+
+    // Now check if we need to rebase (git fetch was running in background)
+    println!();
+    print!("  {} Checking origin/main... ", "⬇️".cyan());
+    io::stdout().flush().unwrap();
+
+    let fetch_failed = match fetch_handle.join() {
+        Ok(Ok(output)) if !output.status.success() => {
+            println!("{}", "fetch failed".red());
+            error!(
+                "Failed to fetch from origin: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            true
+        }
+        Ok(Err(e)) => {
+            println!("{}", "fetch failed".red());
+            error!("Failed to run git fetch: {}", e);
+            true
+        }
+        Err(_) => {
+            println!("{}", "fetch failed".red());
+            error!("git fetch thread panicked");
+            true
+        }
+        Ok(Ok(_)) => false, // Success
+    };
+
+    if fetch_failed {
+        std::process::exit(1);
+    }
+
+    // Check if current branch is fast-forward to origin/main
+    let merge_base_output = command_with_color("git")
+        .args(["merge-base", "HEAD", "origin/main"])
+        .output();
+
+    let merge_base = match merge_base_output {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+        _ => {
+            println!("{}", "failed".red());
+            error!("Failed to find merge base with origin/main");
+            std::process::exit(1);
+        }
+    };
+
+    // Get origin/main rev
+    let origin_main_rev = match command_with_color("git")
+        .args(["rev-parse", "origin/main"])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+        _ => {
+            println!("{}", "failed".red());
+            error!("Failed to get origin/main revision");
+            std::process::exit(1);
+        }
+    };
+
+    // Check if origin/main is ahead of merge_base (meaning we need to rebase)
+    if origin_main_rev != merge_base {
+        println!("{}", "rebase needed".yellow());
+        println!();
+        println!(
+            "{} {}",
+            "⚠️".yellow(),
+            "Your branch has diverged from origin/main".yellow().bold()
+        );
+        println!("  Please rebase your changes and push again:");
+        println!("    {}", "git rebase origin/main".cyan());
+        std::process::exit(1);
+    }
+
+    println!("{}", "up to date".green());
     std::process::exit(0);
 }
 
