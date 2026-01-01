@@ -1381,7 +1381,29 @@ fn run_pre_push() {
         .map(|pkg| pkg.name.to_string())
         .collect();
 
-    // Get the list of changed files between origin/main and HEAD (using cached ref)
+    // Wait for git fetch to complete before checking changed files
+    // This ensures origin/main is up-to-date for an accurate diff
+    let fetch_result = fetch_handle.join();
+    let fetch_failed = match &fetch_result {
+        Ok(Ok(output)) if !output.status.success() => {
+            warn!(
+                "Failed to fetch from origin: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            true
+        }
+        Ok(Err(e)) => {
+            warn!("Failed to run git fetch: {}", e);
+            true
+        }
+        Err(_) => {
+            warn!("git fetch thread panicked");
+            true
+        }
+        Ok(Ok(_)) => false,
+    };
+
+    // Get the list of changed files between origin/main and HEAD
     let mut changed_files: std::collections::BTreeSet<String> = BTreeSet::new();
 
     let diff_output = command_with_color("git")
@@ -1414,6 +1436,36 @@ fn run_pre_push() {
         std::process::exit(0);
     }
 
+    // Get commit range info for display
+    let origin_main_sha = Command::new("git")
+        .args(["rev-parse", "--short", "origin/main"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "origin/main".to_string());
+
+    let head_sha = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "HEAD".to_string());
+
+    let commit_count = Command::new("git")
+        .args(["rev-list", "--count", "origin/main..HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .parse::<u32>()
+                .ok()
+        })
+        .unwrap_or(0);
+
     // Build a map from directory to crate name using workspace packages
     let mut dir_to_crate: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
@@ -1423,8 +1475,9 @@ fn run_pre_push() {
         }
     }
 
-    // Find which crates are affected
-    let mut affected_crates = HashSet::new();
+    // Find which crates are affected and track which files triggered each
+    let mut crate_to_files: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
 
     for file in &changed_files {
         let initial_path = Path::new(file);
@@ -1438,7 +1491,10 @@ fn run_pre_push() {
         loop {
             let current_str = current_path.to_string_lossy().to_string();
             if let Some(crate_name) = dir_to_crate.get(&current_str) {
-                affected_crates.insert(crate_name.clone());
+                crate_to_files
+                    .entry(crate_name.clone())
+                    .or_default()
+                    .push(file.clone());
                 break;
             }
 
@@ -1448,33 +1504,49 @@ fn run_pre_push() {
         }
     }
 
-    if affected_crates.is_empty() {
+    if crate_to_files.is_empty() {
         println!("{}", "No crates affected by changes".yellow());
         std::process::exit(0);
     }
 
     // Filter affected crates to exclude those in the excluded list
-    affected_crates.retain(|crate_name| !excluded_crates.contains(crate_name));
+    crate_to_files.retain(|crate_name, _| !excluded_crates.contains(crate_name));
 
-    if affected_crates.is_empty() {
+    if crate_to_files.is_empty() {
         println!("{}", "No publishable crates affected by changes".yellow());
         std::process::exit(0);
     }
 
     // Sort for consistent output
-    let affected_crates: BTreeSet<_> = affected_crates.into_iter().collect();
+    let affected_crates: BTreeSet<_> = crate_to_files.keys().cloned().collect();
 
-    // Print header with affected crates
+    // Print header explaining what we're checking and why
+    let commit_label = if commit_count == 1 {
+        "commit"
+    } else {
+        "commits"
+    };
     println!(
-        "{} {}",
-        "Pre-push:".cyan().bold(),
-        affected_crates
-            .iter()
-            .map(|s| s.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-            .yellow()
+        "{} {} {}",
+        "Commit range:".cyan().bold(),
+        format!("{}..{}", origin_main_sha, head_sha).dimmed(),
+        format!("({} {})", commit_count, commit_label).dimmed()
     );
+    println!("{}", "Dirty crates:".cyan().bold());
+    for crate_name in &affected_crates {
+        if let Some(files) = crate_to_files.get(crate_name) {
+            let file_list = if files.len() <= 3 {
+                files.join(", ")
+            } else {
+                format!("{}, ... (+{} more)", files[..3].join(", "), files.len() - 3)
+            };
+            println!(
+                "  {} {}",
+                format!("{}:", crate_name).yellow(),
+                file_list.dimmed()
+            );
+        }
+    }
     println!();
 
     // Create progress tracker with spinners
@@ -1831,33 +1903,12 @@ fn run_pre_push() {
         }
     }
 
-    // Now check if we need to rebase (git fetch was running in background)
+    // Check if fetch failed earlier (we already waited for it before diffing)
     print!("   {} ", "Branch:".dimmed());
     io::stdout().flush().unwrap();
 
-    let fetch_failed = match fetch_handle.join() {
-        Ok(Ok(output)) if !output.status.success() => {
-            println!("{}", "fetch failed".red());
-            error!(
-                "Failed to fetch from origin: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            true
-        }
-        Ok(Err(e)) => {
-            println!("{}", "fetch failed".red());
-            error!("Failed to run git fetch: {}", e);
-            true
-        }
-        Err(_) => {
-            println!("{}", "fetch failed".red());
-            error!("git fetch thread panicked");
-            true
-        }
-        Ok(Ok(_)) => false, // Success
-    };
-
     if fetch_failed {
+        println!("{}", "fetch failed".red());
         std::process::exit(1);
     }
 
