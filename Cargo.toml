@@ -7,6 +7,7 @@ keywords = ["code-generation", "templates"]
 categories = ["development-tools"]
 rust-version = "1.87"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/bearcove/captain"
 
 [package.metadata.docs.rs]
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
@@ -31,3 +32,8 @@ rayon = "1"
 indicatif = "0.17"
 
 [dev-dependencies]
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
