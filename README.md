@@ -26,13 +26,27 @@ captain automates the following tasks:
 
 ## Installation
 
-Install captain from crates.io:
+### Quick Install (recommended)
+
+On macOS and Linux:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/bearcove/captain/releases/latest/download/captain-installer.sh | sh
+```
+
+On Windows (PowerShell):
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://github.com/bearcove/captain/releases/latest/download/captain-installer.ps1 | iex"
+```
+
+### From crates.io
 
 ```bash
 cargo install captain
 ```
 
-Or build from source:
+### From source
 
 ```bash
 cargo install --git https://github.com/bearcove/captain
