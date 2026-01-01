@@ -8,10 +8,10 @@ use std::{
     borrow::Cow,
     ffi::OsStr,
     fs,
-    io::{self, BufRead, BufReader, Write},
+    io::{self, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use supports_color::{self, Stream as ColorStream};
 use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
@@ -19,7 +19,7 @@ use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
 mod readme;
 mod utils;
 
-use utils::{TaskProgress, dir_size, format_size};
+use utils::{TaskProgress, dir_size, format_size, run_command_with_spinner};
 
 fn terminal_supports_color(stream: ColorStream) -> bool {
     supports_color::on_cached(stream).is_some()
@@ -30,14 +30,6 @@ fn maybe_strip_bytes<'a>(data: &'a [u8], stream: ColorStream) -> Cow<'a, [u8]> {
         Cow::Borrowed(data)
     } else {
         Cow::Owned(strip_ansi_escapes::strip(data))
-    }
-}
-
-fn maybe_strip_str<'a>(line: &'a str, stream: ColorStream) -> Cow<'a, str> {
-    if terminal_supports_color(stream) {
-        Cow::Borrowed(line)
-    } else {
-        Cow::Owned(strip_ansi_escapes::strip_str(line))
     }
 }
 
@@ -1162,143 +1154,6 @@ fn should_skip_doc_tests(output: &std::process::Output) -> bool {
         || stderr.contains("no library targets found")
 }
 
-/// Runs a command with smart streaming behavior:
-/// - Shows elapsed time from the start
-/// - Buffers output for the first 5 seconds
-/// - If command completes within 5s, returns without printing
-/// - If it takes >5s, starts streaming output in real-time
-/// - Updates elapsed time every second during execution
-fn run_command_with_streaming(
-    command: &[String],
-    envs: &[(&str, &str)],
-) -> Result<std::process::Output, std::io::Error> {
-    let mut cmd = command_with_color(&command[0]);
-    for arg in &command[1..] {
-        cmd.arg(arg);
-    }
-    for (key, value) in envs {
-        cmd.env(key, value);
-    }
-
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-
-    let mut child = cmd.spawn()?;
-
-    let stdout = child.stdout.take().expect("Failed to capture stdout");
-    let stderr = child.stderr.take().expect("Failed to capture stderr");
-
-    let start_time = Instant::now();
-    let threshold = Duration::from_secs(5);
-
-    // Channels to collect output
-    let (stdout_tx, stdout_rx) = mpsc::channel::<String>();
-    let (stderr_tx, stderr_rx) = mpsc::channel::<String>();
-
-    // Spawn threads to read stdout and stderr
-    let stdout_thread = std::thread::spawn(move || {
-        let reader = BufReader::new(stdout);
-        for line in reader.lines().map_while(Result::ok) {
-            let _ = stdout_tx.send(line);
-        }
-    });
-
-    let stderr_thread = std::thread::spawn(move || {
-        let reader = BufReader::new(stderr);
-        for line in reader.lines().map_while(Result::ok) {
-            let _ = stderr_tx.send(line);
-        }
-    });
-
-    // Collect output and decide when to start streaming
-    let mut stdout_buffer = Vec::new();
-    let mut stderr_buffer = Vec::new();
-    let mut streaming = false;
-
-    loop {
-        // Check if process has exited
-        match child.try_wait()? {
-            Some(status) => {
-                // Process has finished, collect remaining output
-                while let Ok(line) = stdout_rx.try_recv() {
-                    if streaming {
-                        println!("{}", maybe_strip_str(&line, ColorStream::Stdout));
-                    }
-                    stdout_buffer.push(line);
-                }
-                while let Ok(line) = stderr_rx.try_recv() {
-                    if streaming {
-                        eprintln!("{}", maybe_strip_str(&line, ColorStream::Stderr));
-                    }
-                    stderr_buffer.push(line);
-                }
-
-                // Wait for reader threads to finish
-                let _ = stdout_thread.join();
-                let _ = stderr_thread.join();
-
-                // If we were streaming, print a newline for clean output
-                if streaming {
-                    println!();
-                }
-
-                // Reconstruct output
-                let stdout_bytes = stdout_buffer.join("\n").into_bytes();
-                let stderr_bytes = stderr_buffer.join("\n").into_bytes();
-
-                return Ok(std::process::Output {
-                    status,
-                    stdout: stdout_bytes,
-                    stderr: stderr_bytes,
-                });
-            }
-            None => {
-                // Process is still running
-                let elapsed = start_time.elapsed();
-
-                // Check if we should start streaming
-                if !streaming && elapsed >= threshold {
-                    streaming = true;
-                    // Print the elapsed time indicator
-                    println!(
-                        "  {} Taking longer than expected, streaming output...",
-                        "⏱️".yellow()
-                    );
-                    // Flush buffered output
-                    for line in &stdout_buffer {
-                        println!("{}", maybe_strip_str(line, ColorStream::Stdout));
-                    }
-                    for line in &stderr_buffer {
-                        eprintln!("{}", maybe_strip_str(line, ColorStream::Stderr));
-                    }
-                }
-
-                // Collect new output
-                let mut got_output = false;
-                while let Ok(line) = stdout_rx.try_recv() {
-                    if streaming {
-                        println!("{}", maybe_strip_str(&line, ColorStream::Stdout));
-                    }
-                    stdout_buffer.push(line);
-                    got_output = true;
-                }
-                while let Ok(line) = stderr_rx.try_recv() {
-                    if streaming {
-                        eprintln!("{}", maybe_strip_str(&line, ColorStream::Stderr));
-                    }
-                    stderr_buffer.push(line);
-                    got_output = true;
-                }
-
-                // Sleep briefly to avoid busy-waiting
-                if !got_output {
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-            }
-        }
-    }
-}
-
 fn debug_packages() {
     use std::collections::HashSet;
 
@@ -1692,7 +1547,7 @@ fn run_pre_push() {
             "warnings".to_string(),
         ]);
 
-        let clippy_output = progress.suspend(|| run_command_with_streaming(&clippy_command, &[]));
+        let clippy_output = run_command_with_spinner(&clippy_command, &[], spinner);
         let elapsed = start.elapsed();
 
         match clippy_output {
@@ -1737,7 +1592,7 @@ fn run_pre_push() {
             build_command.push(crate_name.to_string());
         }
 
-        let build_output = progress.suspend(|| run_command_with_streaming(&build_command, &[]));
+        let build_output = run_command_with_spinner(&build_command, &[], build_spinner);
         let elapsed = start.elapsed();
 
         match build_output {
@@ -1827,7 +1682,7 @@ fn run_pre_push() {
             }
         }
 
-        let doctest_output = progress.suspend(|| run_command_with_streaming(&doctest_command, &[]));
+        let doctest_output = run_command_with_spinner(&doctest_command, &[], spinner);
         let elapsed = start.elapsed();
 
         match doctest_output {
@@ -1835,7 +1690,8 @@ fn run_pre_push() {
                 spinner.succeed(elapsed.as_secs_f32());
             }
             Ok(output) if should_skip_doc_tests(&output) => {
-                spinner.skip("no lib");
+                // No lib to test - just hide this task
+                spinner.clear();
             }
             Ok(output) => {
                 spinner.fail(elapsed.as_secs_f32());
