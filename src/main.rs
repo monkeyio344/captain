@@ -344,7 +344,7 @@ struct PrePushConfig {
     clippy_features: Option<FeatureList>,
     #[facet(kdl::child, default = true)]
     nextest: bool,
-    #[facet(kdl::child, default = true)]
+    #[facet(kdl::child, default = false)]
     doc_tests: bool,
     /// Features to use for doc tests. If None, uses --all-features.
     #[facet(kdl::child, default)]
