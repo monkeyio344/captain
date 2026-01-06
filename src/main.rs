@@ -1159,9 +1159,6 @@ fn run_pre_push() {
         );
     }
 
-    // Create progress tracker for setup phase
-    let progress = TaskProgress::new();
-
     // Set up shared target directory
     let shared_target_dir = get_shared_target_dir();
 
@@ -1182,6 +1179,9 @@ fn run_pre_push() {
             let _ = dir_size_tx.send((target_dir_clone, size));
         });
     }
+
+    // Create progress tracker for setup phase - must be before any spawned tasks
+    let progress = TaskProgress::new();
 
     // Spawn git fetch in background - we'll check the result at the end
     let fetch_spinner = progress.add_task("fetch");
@@ -1237,6 +1237,104 @@ fn run_pre_push() {
     }
 
     let workspace_root = metadata.workspace_root.clone().into_std_path_buf();
+
+    // Type alias for background task results
+    type CommandResult = (
+        Vec<String>,
+        Result<std::process::Output, std::io::Error>,
+        Duration,
+    );
+
+    // Start workspace-wide checks immediately (don't wait for git fetch/diff)
+    // These don't need to know which specific crates changed
+
+    // 1. Run clippy on entire workspace
+    let clippy_spinner = if config.pre_push.clippy {
+        Some(progress.add_task("clippy"))
+    } else {
+        None
+    };
+
+    if let Some(ref spinner) = clippy_spinner {
+        let start = std::time::Instant::now();
+        let mut clippy_command = vec!["cargo".to_string(), "clippy".to_string()];
+        clippy_command.push("--workspace".to_string());
+        clippy_command.push("--all-targets".to_string());
+        // Use configured features, or --all-features if not specified
+        match &config.pre_push.clippy_features {
+            None => {
+                clippy_command.push("--all-features".to_string());
+            }
+            Some(features) if !features.features.is_empty() => {
+                clippy_command.push("--features".to_string());
+                clippy_command.push(features.features.join(","));
+            }
+            Some(_) => {
+                // Empty features list means no extra features
+            }
+        }
+        clippy_command.extend(vec![
+            "--".to_string(),
+            "-D".to_string(),
+            "warnings".to_string(),
+        ]);
+
+        let clippy_output = run_command_with_spinner(&clippy_command, &[], spinner);
+        let elapsed = start.elapsed();
+
+        match clippy_output {
+            Ok(output) if output.status.success() => {
+                spinner.succeed(elapsed.as_secs_f32());
+            }
+            Ok(output) => {
+                spinner.fail(elapsed.as_secs_f32());
+                let hint_command = clippy_command.clone();
+                exit_with_command_failure(
+                    &clippy_command,
+                    &[],
+                    output,
+                    Some(Box::new(move || print_clippy_fix_hint(&hint_command))),
+                );
+            }
+            Err(e) => {
+                spinner.fail(elapsed.as_secs_f32());
+                let hint_command = clippy_command.clone();
+                exit_with_command_error(
+                    &clippy_command,
+                    &[],
+                    e,
+                    Some(Box::new(move || print_clippy_fix_hint(&hint_command))),
+                );
+            }
+        }
+    }
+
+    // 2. Spawn cargo-shear in background (completely independent)
+    let shear_spinner = if config.pre_push.cargo_shear {
+        Some(progress.add_task("cargo-shear"))
+    } else {
+        None
+    };
+
+    let shear_handle: Option<std::thread::JoinHandle<CommandResult>> =
+        if config.pre_push.cargo_shear {
+            let handle = std::thread::spawn(move || {
+                let start = std::time::Instant::now();
+                let shear_command = vec!["cargo".to_string(), "shear".to_string()];
+                let mut cmd = command_with_color(&shear_command[0]);
+                for arg in &shear_command[1..] {
+                    cmd.arg(arg);
+                }
+                cmd.stdout(Stdio::piped());
+                cmd.stderr(Stdio::piped());
+                let output = cmd.output();
+                let elapsed = start.elapsed();
+                (shear_command, output, elapsed)
+            });
+            Some(handle)
+        } else {
+            None
+        };
 
     // Get the set of workspace member crate IDs
     let workspace_member_ids: HashSet<_> = metadata
@@ -1433,15 +1531,10 @@ fn run_pre_push() {
     }
     println!();
 
-    // Continue with check phase spinners
+    // Continue with crate-specific check phase spinners
     println!();
 
-    // Create spinners for enabled tasks
-    let clippy_spinner = if config.pre_push.clippy {
-        Some(progress.add_task("clippy"))
-    } else {
-        None
-    };
+    // Create spinners for crate-specific tasks
     let build_spinner = if config.pre_push.nextest {
         Some(progress.add_task("build tests"))
     } else {
@@ -1449,11 +1542,6 @@ fn run_pre_push() {
     };
     let test_spinner = if config.pre_push.nextest {
         Some(progress.add_task("run tests"))
-    } else {
-        None
-    };
-    let shear_spinner = if config.pre_push.cargo_shear {
-        Some(progress.add_task("cargo-shear"))
     } else {
         None
     };
@@ -1468,93 +1556,7 @@ fn run_pre_push() {
         None
     };
 
-    // Type alias for background task results
-    type CommandResult = (
-        Vec<String>,
-        Result<std::process::Output, std::io::Error>,
-        Duration,
-    );
-
-    // 1. Run clippy FIRST - catches most issues quickly
-    if let Some(ref spinner) = clippy_spinner {
-        let start = std::time::Instant::now();
-        let mut clippy_command = vec!["cargo".to_string(), "clippy".to_string()];
-        for crate_name in &affected_crates {
-            clippy_command.push("-p".to_string());
-            clippy_command.push(crate_name.to_string());
-        }
-        clippy_command.push("--all-targets".to_string());
-        // Use configured features, or --all-features if not specified
-        match &config.pre_push.clippy_features {
-            None => {
-                clippy_command.push("--all-features".to_string());
-            }
-            Some(features) if !features.features.is_empty() => {
-                clippy_command.push("--features".to_string());
-                clippy_command.push(features.features.join(","));
-            }
-            Some(_) => {
-                // Empty features list means no extra features
-            }
-        }
-        clippy_command.extend(vec![
-            "--".to_string(),
-            "-D".to_string(),
-            "warnings".to_string(),
-        ]);
-
-        let clippy_output = run_command_with_spinner(&clippy_command, &[], spinner);
-        let elapsed = start.elapsed();
-
-        match clippy_output {
-            Ok(output) if output.status.success() => {
-                spinner.succeed(elapsed.as_secs_f32());
-            }
-            Ok(output) => {
-                spinner.fail(elapsed.as_secs_f32());
-                let hint_command = clippy_command.clone();
-                exit_with_command_failure(
-                    &clippy_command,
-                    &[],
-                    output,
-                    Some(Box::new(move || print_clippy_fix_hint(&hint_command))),
-                );
-            }
-            Err(e) => {
-                spinner.fail(elapsed.as_secs_f32());
-                let hint_command = clippy_command.clone();
-                exit_with_command_error(
-                    &clippy_command,
-                    &[],
-                    e,
-                    Some(Box::new(move || print_clippy_fix_hint(&hint_command))),
-                );
-            }
-        }
-    }
-
-    // 2. Spawn cargo-shear in background (completely independent)
-    let shear_handle: Option<std::thread::JoinHandle<CommandResult>> =
-        if config.pre_push.cargo_shear {
-            let handle = std::thread::spawn(move || {
-                let start = std::time::Instant::now();
-                let shear_command = vec!["cargo".to_string(), "shear".to_string()];
-                let mut cmd = command_with_color(&shear_command[0]);
-                for arg in &shear_command[1..] {
-                    cmd.arg(arg);
-                }
-                cmd.stdout(Stdio::piped());
-                cmd.stderr(Stdio::piped());
-                let output = cmd.output();
-                let elapsed = start.elapsed();
-                (shear_command, output, elapsed)
-            });
-            Some(handle)
-        } else {
-            None
-        };
-
-    // 3. Build nextest tests
+    // 1. Build nextest tests
     let test_handle: Option<std::thread::JoinHandle<CommandResult>> = if config.pre_push.nextest {
         let build_spinner = build_spinner.as_ref().unwrap();
         let start = std::time::Instant::now();
@@ -1615,7 +1617,7 @@ fn run_pre_push() {
         None
     };
 
-    // 4. Spawn doc tests in background (independent of other tasks)
+    // 2. Spawn doc tests in background (independent of other tasks)
     let doctest_handle: Option<std::thread::JoinHandle<CommandResult>> =
         if doctest_spinner.is_some() {
             let affected_crates_clone = affected_crates.clone();
@@ -1657,7 +1659,7 @@ fn run_pre_push() {
             None
         };
 
-    // 5. Spawn docs build in background (independent of other tasks)
+    // 3. Spawn docs build in background (independent of other tasks)
     let docs_handle: Option<std::thread::JoinHandle<CommandResult>> = if docs_spinner.is_some() {
         let affected_crates_clone = affected_crates.clone();
         let docs_features = config.pre_push.docs_features.clone();
@@ -1701,7 +1703,7 @@ fn run_pre_push() {
         None
     };
 
-    // 6. Wait for cargo-shear background task
+    // 4. Wait for cargo-shear background task
     if let Some(handle) = shear_handle {
         let spinner = shear_spinner.as_ref().unwrap();
 
@@ -1735,7 +1737,7 @@ fn run_pre_push() {
         }
     }
 
-    // 7. Wait for doc tests
+    // 5. Wait for doc tests
     if let Some(handle) = doctest_handle {
         let spinner = doctest_spinner.as_ref().unwrap();
 
@@ -1765,7 +1767,7 @@ fn run_pre_push() {
         }
     }
 
-    // 8. Wait for docs build
+    // 6. Wait for docs build
     if let Some(handle) = docs_handle {
         let spinner = docs_spinner.as_ref().unwrap();
 
@@ -1793,7 +1795,7 @@ fn run_pre_push() {
         }
     }
 
-    // 9. Wait for test results
+    // 7. Wait for test results
     if let Some(handle) = test_handle {
         let spinner = test_spinner.as_ref().unwrap();
 
