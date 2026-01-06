@@ -35,6 +35,12 @@ impl TaskSpinner {
         ));
     }
 
+    /// Mark task as successful with a custom message
+    pub fn succeed_with_message(&self, message: String) {
+        self.bar.set_style(finished_style());
+        self.bar.finish_with_message(message);
+    }
+
     /// Mark task as failed with elapsed time
     pub fn fail(&self, elapsed_secs: f32) {
         self.bar.set_style(finished_style());

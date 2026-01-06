@@ -1374,11 +1374,55 @@ fn run_pre_push() {
             warn!("git fetch thread panicked");
             true
         }
-        Ok(Ok(_)) => {
-            fetch_spinner.succeed(fetch_elapsed);
-            false
-        }
+        Ok(Ok(_)) => false,
     };
+
+    // Get commit range info for display
+    let origin_main_sha = Command::new("git")
+        .args(["rev-parse", "--short", "origin/main"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "origin/main".to_string());
+
+    let head_sha = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "HEAD".to_string());
+
+    let commit_count = Command::new("git")
+        .args(["rev-list", "--count", "origin/main..HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .parse::<u32>()
+                .ok()
+        })
+        .unwrap_or(0);
+
+    // Update fetch spinner with commit range info
+    let commit_label = if commit_count == 1 {
+        "commit"
+    } else {
+        "commits"
+    };
+    fetch_spinner.succeed_with_message(format!(
+        "  {} {:<14} {} {}..{} ({} {})",
+        "✓".green(),
+        "fetch",
+        format!("{:.1}s", fetch_elapsed).dimmed(),
+        origin_main_sha,
+        head_sha,
+        commit_count,
+        commit_label
+    ));
 
     // Get the list of changed files between origin/main and HEAD
     let diff_spinner = progress.add_task("diff");
@@ -1417,36 +1461,6 @@ fn run_pre_push() {
         println!("{}", "No changes detected".green().bold());
         std::process::exit(0);
     }
-
-    // Get commit range info for display
-    let origin_main_sha = Command::new("git")
-        .args(["rev-parse", "--short", "origin/main"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|| "origin/main".to_string());
-
-    let head_sha = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|| "HEAD".to_string());
-
-    let commit_count = Command::new("git")
-        .args(["rev-list", "--count", "origin/main..HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .trim()
-                .parse::<u32>()
-                .ok()
-        })
-        .unwrap_or(0);
 
     // Build a map from directory to crate name using workspace packages
     let mut dir_to_crate: std::collections::HashMap<String, String> =
@@ -1501,38 +1515,6 @@ fn run_pre_push() {
 
     // Sort for consistent output
     let affected_crates: BTreeSet<_> = crate_to_files.keys().cloned().collect();
-
-    // Print header explaining what we're checking and why
-    let commit_label = if commit_count == 1 {
-        "commit"
-    } else {
-        "commits"
-    };
-    println!(
-        "{} {} {}",
-        "Commit range:".cyan().bold(),
-        format!("{}..{}", origin_main_sha, head_sha).dimmed(),
-        format!("({} {})", commit_count, commit_label).dimmed()
-    );
-    println!("{}", "Dirty crates:".cyan().bold());
-    for crate_name in &affected_crates {
-        if let Some(files) = crate_to_files.get(crate_name) {
-            let file_list = if files.len() <= 3 {
-                files.join(", ")
-            } else {
-                format!("{}, ... (+{} more)", files[..3].join(", "), files.len() - 3)
-            };
-            println!(
-                "  {} {}",
-                format!("{}:", crate_name).yellow(),
-                file_list.dimmed()
-            );
-        }
-    }
-    println!();
-
-    // Continue with crate-specific check phase spinners
-    println!();
 
     // Create spinners for crate-specific tasks
     let build_spinner = if config.pre_push.nextest {
@@ -1823,6 +1805,24 @@ fn run_pre_push() {
 
     println!();
     println!("{} {}", "✅".green(), "All checks passed!".green().bold());
+
+    // Print affected crates summary
+    println!();
+    println!("{}", "Dirty crates:".cyan().bold());
+    for crate_name in &affected_crates {
+        if let Some(files) = crate_to_files.get(crate_name) {
+            let file_list = if files.len() <= 3 {
+                files.join(", ")
+            } else {
+                format!("{}, ... (+{} more)", files[..3].join(", "), files.len() - 3)
+            };
+            println!(
+                "  {} {}",
+                format!("{}:", crate_name).yellow(),
+                file_list.dimmed()
+            );
+        }
+    }
 
     // Print shared target dir size (non-blocking check)
     if shared_target_dir.is_some() {
@@ -2531,7 +2531,8 @@ fn collect_staged_files() -> io::Result<StagedFiles> {
         );
 
         // Staged and not dirty (to be formatted/committed)
-        if x != ' ' && x != '?' && y == ' ' {
+        // Exclude deleted files (D) - they don't exist to read
+        if x != ' ' && x != '?' && x != 'D' && y == ' ' {
             // Convert relative path to absolute for consistent comparison
             let abs_path = cwd.join(&path);
             log::debug!(
