@@ -249,23 +249,18 @@ fn check_edition_2024() {
     // Check workspace.package.edition in root Cargo.toml (if it exists)
     let workspace_root = &metadata.workspace_root;
     let root_cargo_toml = workspace_root.join("Cargo.toml");
-    if root_cargo_toml.as_std_path().exists() {
-        if let Ok(content) = fs::read_to_string(root_cargo_toml.as_std_path()) {
-            if let Ok(doc) = content.parse::<DocumentMut>() {
-                if let Some(workspace) = doc.get("workspace").and_then(Item::as_table) {
-                    if let Some(package) = workspace.get("package").and_then(Item::as_table) {
-                        if let Some(edition) = package.get("edition").and_then(Item::as_str) {
-                            if edition != "2024" {
-                                errors.push(format!(
-                                    "{}: [workspace.package].edition = {:?} (expected \"2024\")",
-                                    root_cargo_toml, edition
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    if root_cargo_toml.as_std_path().exists()
+        && let Ok(content) = fs::read_to_string(root_cargo_toml.as_std_path())
+        && let Ok(doc) = content.parse::<DocumentMut>()
+        && let Some(workspace) = doc.get("workspace").and_then(Item::as_table)
+        && let Some(package) = workspace.get("package").and_then(Item::as_table)
+        && let Some(edition) = package.get("edition").and_then(Item::as_str)
+        && edition != "2024"
+    {
+        errors.push(format!(
+            "{}: [workspace.package].edition = {:?} (expected \"2024\")",
+            root_cargo_toml, edition
+        ));
     }
 
     // Get workspace members
@@ -448,10 +443,10 @@ fn enqueue_readme_jobs(
 
     let find_template = |filename: &str| -> Option<String> {
         for dir in &template_dirs {
-            if dir.exists() {
-                if let Ok(content) = fs::read_to_string(dir.join(filename)) {
-                    return Some(content);
-                }
+            if dir.exists()
+                && let Ok(content) = fs::read_to_string(dir.join(filename))
+            {
+                return Some(content);
             }
         }
         None
@@ -678,10 +673,9 @@ fn workspace_name_from_metadata(workspace_dir: &Path) -> Result<String, String> 
         .get("resolve")
         .and_then(|resolve| resolve.get("root"))
         .and_then(|root| root.as_str())
+        && let Some(name) = package_name_by_id(&metadata, root_id)
     {
-        if let Some(name) = package_name_by_id(&metadata, root_id) {
-            return Ok(name.to_string());
-        }
+        return Ok(name.to_string());
     }
 
     if let Some(default_members) = metadata
@@ -689,10 +683,10 @@ fn workspace_name_from_metadata(workspace_dir: &Path) -> Result<String, String> 
         .and_then(|members| members.as_array())
     {
         for member in default_members {
-            if let Some(member_id) = member.as_str() {
-                if let Some(name) = package_name_by_id(&metadata, member_id) {
-                    return Ok(name.to_string());
-                }
+            if let Some(member_id) = member.as_str()
+                && let Some(name) = package_name_by_id(&metadata, member_id)
+            {
+                return Ok(name.to_string());
             }
         }
     }
@@ -708,12 +702,10 @@ fn workspace_name_from_metadata(workspace_dir: &Path) -> Result<String, String> 
             if let (Some(name), Some(manifest_path_str)) = (
                 pkg.get("name").and_then(|n| n.as_str()),
                 pkg.get("manifest_path").and_then(|path| path.as_str()),
-            ) {
-                if let Ok(pkg_manifest_path) = fs::canonicalize(manifest_path_str) {
-                    if pkg_manifest_path == canonical_manifest {
-                        return Ok(name.to_string());
-                    }
-                }
+            ) && let Ok(pkg_manifest_path) = fs::canonicalize(manifest_path_str)
+                && pkg_manifest_path == canonical_manifest
+            {
+                return Ok(name.to_string());
             }
         }
     }
@@ -960,10 +952,10 @@ fn enqueue_arborium_jobs_sync() -> Vec<Job> {
 
             // Also update Cargo.toml to add docsrs metadata if not present
             let cargo_toml_path = crate_dir.join("Cargo.toml");
-            if cargo_toml_path.exists() {
-                if let Some(job) = rewrite_cargo_toml(&cargo_toml_path, ensure_docsrs_metadata) {
-                    jobs.push(job);
-                }
+            if cargo_toml_path.exists()
+                && let Some(job) = rewrite_cargo_toml(&cargo_toml_path, ensure_docsrs_metadata)
+            {
+                jobs.push(job);
             }
         }
     }
@@ -1009,10 +1001,10 @@ fn enforce_rust_version_sync() -> Vec<Job> {
 
         if let Some(manifest_dir) = package.manifest_path.parent() {
             let cargo_toml_path: PathBuf = manifest_dir.into();
-            if cargo_toml_path.exists() {
-                if let Some(job) = rewrite_cargo_toml(&cargo_toml_path, ensure_rust_version) {
-                    jobs.push(job);
-                }
+            if cargo_toml_path.exists()
+                && let Some(job) = rewrite_cargo_toml(&cargo_toml_path, ensure_rust_version)
+            {
+                jobs.push(job);
             }
         }
     }
@@ -2627,9 +2619,12 @@ mod tests {
 
     #[test]
     fn disable_pre_commit_options() {
-        // KDL v2 uses #false for boolean false
         let kdl = r#"
-            pre-commit generate-readmes=#false rustfmt=#false cargo-lock=#false
+            pre-commit {
+                generate-readmes #false
+                rustfmt #false
+                cargo-lock #false
+            }
         "#;
         let config: CaptainConfig = facet_kdl::from_str(kdl).unwrap();
         assert!(!config.pre_commit.generate_readmes);
@@ -2644,7 +2639,13 @@ mod tests {
     #[test]
     fn disable_pre_push_options() {
         let kdl = r#"
-            pre-push clippy=#false nextest=#false doc-tests=#false docs=#false cargo-shear=#false
+            pre-push {
+                clippy #false
+                nextest #false
+                doc-tests #false
+                docs #false
+                cargo-shear #false
+            }
         "#;
         let config: CaptainConfig = facet_kdl::from_str(kdl).unwrap();
         assert!(!config.pre_push.clippy);
@@ -2678,8 +2679,12 @@ mod tests {
     #[test]
     fn mixed_config() {
         let kdl = r#"
-            pre-commit generate-readmes=#false arborium=#false
-            pre-push nextest=#false {
+            pre-commit {
+                generate-readmes #false
+                arborium #false
+            }
+            pre-push {
+                nextest #false
                 clippy-features "serde"
             }
         "#;
@@ -2699,7 +2704,9 @@ mod tests {
     #[test]
     fn only_pre_commit_block() {
         let kdl = r#"
-            pre-commit rustfmt=#false
+            pre-commit {
+                rustfmt #false
+            }
         "#;
         let config: CaptainConfig = facet_kdl::from_str(kdl).unwrap();
         assert!(!config.pre_commit.rustfmt);
@@ -2711,7 +2718,9 @@ mod tests {
     #[test]
     fn only_pre_push_block() {
         let kdl = r#"
-            pre-push clippy=#false
+            pre-push {
+                clippy #false
+            }
         "#;
         let config: CaptainConfig = facet_kdl::from_str(kdl).unwrap();
         // pre-commit defaults

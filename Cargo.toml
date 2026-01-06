@@ -5,7 +5,7 @@ edition = "2024"
 description = "Development automation tool for Rust workspaces"
 keywords = ["code-generation", "templates"]
 categories = ["development-tools"]
-rust-version = "1.87"
+rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/bearcove/captain"
 
@@ -20,6 +20,7 @@ cargo_metadata = "0.23.1"
 dirs = "6"
 facet = { git = "https://github.com/facet-rs/facet" }
 facet-kdl = { git = "https://github.com/facet-rs/facet" }
+miette = { version = "7", default-features = false, features = ["fancy-no-backtrace"] }
 fs-err = "3.2.0"
 log = { version = "0.4.29", features = ["std"] }
 owo-colors = "4.2.3"
