@@ -388,7 +388,11 @@ fn load_captain_config() -> CaptainConfig {
     match facet_kdl::from_str(&content) {
         Ok(config) => config,
         Err(e) => {
-            error!("Failed to parse {}: {e}", config_path.display());
+            error!(
+                "Failed to parse {}:\n{:?}",
+                config_path.display(),
+                miette::Report::new(e)
+            );
             std::process::exit(1);
         }
     }
@@ -2362,6 +2366,18 @@ fn show_and_apply_jobs(jobs: &mut [Job]) {
 
 fn main() {
     setup_logger();
+
+    miette::set_hook(Box::new(|_| {
+        Box::new(
+            miette::MietteHandlerOpts::new()
+                .terminal_links(true)
+                .unicode(true)
+                .context_lines(3)
+                .tab_width(4)
+                .build(),
+        )
+    }))
+    .expect("Failed to set miette hook");
 
     // Accept allowed log levels: trace, debug, error, warn, info
     log::set_max_level(LevelFilter::Info);
