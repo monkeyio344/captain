@@ -302,18 +302,18 @@ fn check_edition_2024() {
 }
 
 /// Configuration read from `.config/captain/config.kdl`
-#[derive(Debug, Default, facet::Facet)]
-#[facet(default, rename_all = "kebab-case")]
+#[derive(Debug, facet::Facet)]
+#[facet(rename_all = "kebab-case")]
 struct CaptainConfig {
-    #[facet(kdl::child, default)]
+    #[facet(kdl::child)]
     pre_commit: PreCommitConfig,
 
-    #[facet(kdl::child, default)]
+    #[facet(kdl::child)]
     pre_push: PrePushConfig,
 }
 
 #[derive(Debug, facet::Facet)]
-#[facet(default, rename_all = "kebab-case")]
+#[facet(rename_all = "kebab-case")]
 struct PreCommitConfig {
     #[facet(kdl::child, default = true)]
     generate_readmes: bool,
@@ -330,7 +330,7 @@ struct PreCommitConfig {
 }
 
 #[derive(Debug, facet::Facet)]
-#[facet(default, rename_all = "kebab-case")]
+#[facet(rename_all = "kebab-case")]
 struct PrePushConfig {
     #[facet(kdl::child, default = true)]
     clippy: bool,
@@ -353,10 +353,9 @@ struct PrePushConfig {
     cargo_shear: bool,
 }
 
-#[derive(Debug, Default, facet::Facet)]
-#[facet(default)]
+#[derive(Debug, facet::Facet)]
 struct FeatureList {
-    #[facet(kdl::arguments, default)]
+    #[facet(kdl::arguments)]
     features: Vec<String>,
 }
 
@@ -369,19 +368,19 @@ fn get_config_path() -> PathBuf {
 fn load_captain_config() -> CaptainConfig {
     let config_path = get_config_path();
 
-    if !config_path.exists() {
+    let content = if !config_path.exists() {
         debug!(
             "No config file at {}, using defaults",
             config_path.display()
         );
-        return CaptainConfig::default();
-    }
-
-    let content = match fs::read_to_string(&config_path) {
-        Ok(c) => c,
-        Err(e) => {
-            debug!("Failed to read config file: {e}");
-            return CaptainConfig::default();
+        String::new()
+    } else {
+        match fs::read_to_string(&config_path) {
+            Ok(c) => c,
+            Err(e) => {
+                error!("Failed to read config file {}: {e}", config_path.display());
+                std::process::exit(1);
+            }
         }
     };
 
@@ -394,34 +393,6 @@ fn load_captain_config() -> CaptainConfig {
                 miette::Report::new(e)
             );
             std::process::exit(1);
-        }
-    }
-}
-
-impl Default for PreCommitConfig {
-    fn default() -> Self {
-        Self {
-            generate_readmes: true,
-            rustfmt: true,
-            cargo_lock: true,
-            arborium: true,
-            rust_version: true,
-            edition_2024: true,
-        }
-    }
-}
-
-impl Default for PrePushConfig {
-    fn default() -> Self {
-        Self {
-            clippy: true,
-            clippy_features: None,
-            nextest: true,
-            doc_tests: true,
-            doc_test_features: None,
-            docs: true,
-            docs_features: None,
-            cargo_shear: true,
         }
     }
 }
