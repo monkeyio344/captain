@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 use supports_color::{self, Stream as ColorStream};
-use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
+use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
 mod readme;
 mod utils;
@@ -218,20 +218,6 @@ fn ensure_docsrs_metadata(document: &mut DocumentMut) -> bool {
     true
 }
 
-fn ensure_rust_version(document: &mut DocumentMut) -> bool {
-    let package_table = match document.get_mut("package").and_then(Item::as_table_mut) {
-        Some(table) => table,
-        None => return false,
-    };
-
-    if package_table.get("rust-version").and_then(Item::as_str) == Some("1.87") {
-        return false;
-    }
-
-    package_table.insert("rust-version", value("1.87"));
-    true
-}
-
 /// Check that all workspace crates use edition 2024. Bails with an error if not.
 fn check_edition_2024(metadata: &cargo_metadata::Metadata) {
     use std::collections::HashSet;
@@ -315,8 +301,6 @@ struct PreCommitConfig {
     cargo_lock: bool,
     #[facet(kdl::child, default = true)]
     arborium: bool,
-    #[facet(kdl::child, default = true)]
-    rust_version: bool,
     #[facet(kdl::child, default = true)]
     edition_2024: bool,
 }
@@ -897,32 +881,6 @@ fn enqueue_arborium_jobs(
     }
 }
 
-fn enqueue_rust_version_jobs(
-    sender: std::sync::mpsc::Sender<Job>,
-    metadata: &cargo_metadata::Metadata,
-) {
-    use std::collections::HashSet;
-
-    // Get workspace members
-    let workspace_member_ids: HashSet<_> = metadata
-        .workspace_members
-        .iter()
-        .map(|id| &id.repr)
-        .collect();
-
-    // Iterate through workspace packages and ensure they have rust-version set
-    for package in &metadata.packages {
-        if !workspace_member_ids.contains(&package.id.repr) {
-            continue;
-        }
-
-        let manifest_path = &package.manifest_path;
-        if let Some(job) = rewrite_cargo_toml(manifest_path.as_std_path(), ensure_rust_version) {
-            let _ = sender.send(job);
-        }
-    }
-}
-
 fn shell_escape(part: &str) -> String {
     if part
         .chars()
@@ -1201,6 +1159,9 @@ fn run_pre_push() {
         );
     }
 
+    // Create progress tracker for setup phase
+    let progress = TaskProgress::new();
+
     // Set up shared target directory
     let shared_target_dir = get_shared_target_dir();
 
@@ -1223,6 +1184,8 @@ fn run_pre_push() {
     }
 
     // Spawn git fetch in background - we'll check the result at the end
+    let fetch_spinner = progress.add_task("fetch");
+    let fetch_start = std::time::Instant::now();
     let fetch_handle = std::thread::spawn(|| {
         Command::new("git")
             .args(["fetch", "origin", "main"])
@@ -1230,9 +1193,15 @@ fn run_pre_push() {
     });
 
     // Load workspace metadata
+    let metadata_spinner = progress.add_task("metadata");
+    let metadata_start = std::time::Instant::now();
     let metadata = match cargo_metadata::MetadataCommand::new().exec() {
-        Ok(m) => m,
+        Ok(m) => {
+            metadata_spinner.succeed(metadata_start.elapsed().as_secs_f32());
+            m
+        }
         Err(e) => {
+            metadata_spinner.fail(metadata_start.elapsed().as_secs_f32());
             let err_str = e.to_string();
             // No Cargo.toml in this directory - not a Rust project
             if err_str.contains("could not find") {
@@ -1287,8 +1256,10 @@ fn run_pre_push() {
     // Wait for git fetch to complete before checking changed files
     // This ensures origin/main is up-to-date for an accurate diff
     let fetch_result = fetch_handle.join();
+    let fetch_elapsed = fetch_start.elapsed().as_secs_f32();
     let fetch_failed = match &fetch_result {
         Ok(Ok(output)) if !output.status.success() => {
+            fetch_spinner.fail(fetch_elapsed);
             warn!(
                 "Failed to fetch from origin: {}",
                 String::from_utf8_lossy(&output.stderr)
@@ -1296,17 +1267,24 @@ fn run_pre_push() {
             true
         }
         Ok(Err(e)) => {
+            fetch_spinner.fail(fetch_elapsed);
             warn!("Failed to run git fetch: {}", e);
             true
         }
         Err(_) => {
+            fetch_spinner.fail(fetch_elapsed);
             warn!("git fetch thread panicked");
             true
         }
-        Ok(Ok(_)) => false,
+        Ok(Ok(_)) => {
+            fetch_spinner.succeed(fetch_elapsed);
+            false
+        }
     };
 
     // Get the list of changed files between origin/main and HEAD
+    let diff_spinner = progress.add_task("diff");
+    let diff_start = std::time::Instant::now();
     let mut changed_files: std::collections::BTreeSet<String> = BTreeSet::new();
 
     let diff_output = command_with_color("git")
@@ -1318,12 +1296,15 @@ fn run_pre_push() {
             for line in String::from_utf8_lossy(&output.stdout).lines() {
                 changed_files.insert(line.to_string());
             }
+            diff_spinner.succeed(diff_start.elapsed().as_secs_f32());
         }
         Err(e) => {
+            diff_spinner.fail(diff_start.elapsed().as_secs_f32());
             error!("Failed to get changed files: {}", e);
             std::process::exit(1);
         }
         Ok(output) => {
+            diff_spinner.fail(diff_start.elapsed().as_secs_f32());
             error!(
                 "git diff failed: {}",
                 String::from_utf8_lossy(&output.stderr)
@@ -1452,8 +1433,8 @@ fn run_pre_push() {
     }
     println!();
 
-    // Create progress tracker with spinners
-    let progress = TaskProgress::new();
+    // Continue with check phase spinners
+    println!();
 
     // Create spinners for enabled tasks
     let clippy_spinner = if config.pre_push.clippy {
@@ -2179,7 +2160,6 @@ pre-commit {
     // rustfmt #false
     // cargo-lock #false
     // arborium #false
-    // rust-version #false
     // edition-2024 #false
 }
 
@@ -2484,18 +2464,6 @@ fn main() {
         }));
     }
 
-    if config.pre_commit.rust_version {
-        let spinner = progress.add_task("rust-version");
-        spinners.push(("rust-version", spinner, std::time::Instant::now()));
-        handles.push(std::thread::spawn({
-            let sender = tx_job.clone();
-            let metadata_clone = metadata.clone();
-            move || {
-                enqueue_rust_version_jobs(sender, &metadata_clone);
-            }
-        }));
-    }
-
     drop(tx_job);
 
     let mut jobs: Vec<Job> = Vec::new();
@@ -2626,7 +2594,6 @@ mod tests {
         assert!(config.pre_commit.rustfmt);
         assert!(config.pre_commit.cargo_lock);
         assert!(config.pre_commit.arborium);
-        assert!(config.pre_commit.rust_version);
         assert!(config.pre_commit.edition_2024);
         assert!(config.pre_push.clippy);
         assert!(config.pre_push.nextest);
@@ -2666,7 +2633,6 @@ mod tests {
         assert!(!config.pre_commit.cargo_lock);
         // Others still default to true
         assert!(config.pre_commit.arborium);
-        assert!(config.pre_commit.rust_version);
         assert!(config.pre_commit.edition_2024);
     }
 
