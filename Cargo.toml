@@ -15,10 +15,14 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 [package.metadata."docs.rs"]
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
+[package.metadata.cargo-shear]
+ignored = ["facet-default"]
+
 [dependencies]
 cargo_metadata = "0.23.1"
 dirs = "6"
 facet = { git = "https://github.com/facet-rs/facet" }
+facet-default = { git = "https://github.com/facet-rs/facet" }
 facet-kdl = { git = "https://github.com/facet-rs/facet" }
 miette = { version = "7", default-features = false, features = ["fancy-no-backtrace"] }
 fs-err = "3.2.2"

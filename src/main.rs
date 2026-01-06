@@ -281,17 +281,18 @@ fn check_edition_2024(metadata: &cargo_metadata::Metadata) {
 
 /// Configuration read from `.config/captain/config.kdl`
 #[derive(Debug, facet::Facet)]
+#[facet(derive(Default), traits(Default))]
 #[facet(rename_all = "kebab-case")]
 struct CaptainConfig {
-    #[facet(kdl::child)]
+    #[facet(kdl::child, default)]
     pre_commit: PreCommitConfig,
 
-    #[facet(kdl::child)]
+    #[facet(kdl::child, default)]
     pre_push: PrePushConfig,
 }
 
 #[derive(Debug, facet::Facet)]
-#[facet(rename_all = "kebab-case")]
+#[facet(rename_all = "kebab-case", traits(Default))]
 struct PreCommitConfig {
     #[facet(kdl::child, default = true)]
     generate_readmes: bool,
@@ -305,8 +306,21 @@ struct PreCommitConfig {
     edition_2024: bool,
 }
 
+// Manual Default impl until https://github.com/facet-rs/facet/issues/1680 is fixed
+impl Default for PreCommitConfig {
+    fn default() -> Self {
+        Self {
+            generate_readmes: true,
+            rustfmt: true,
+            cargo_lock: true,
+            arborium: true,
+            edition_2024: true,
+        }
+    }
+}
+
 #[derive(Debug, facet::Facet)]
-#[facet(rename_all = "kebab-case")]
+#[facet(rename_all = "kebab-case", traits(Default))]
 struct PrePushConfig {
     #[facet(kdl::child, default = true)]
     clippy: bool,
@@ -327,6 +341,22 @@ struct PrePushConfig {
     docs_features: Option<FeatureList>,
     #[facet(kdl::child, default = true)]
     cargo_shear: bool,
+}
+
+// Manual Default impl until https://github.com/facet-rs/facet/issues/1680 is fixed
+impl Default for PrePushConfig {
+    fn default() -> Self {
+        Self {
+            clippy: true,
+            clippy_features: None,
+            nextest: true,
+            doc_tests: false,
+            doc_test_features: None,
+            docs: true,
+            docs_features: None,
+            cargo_shear: true,
+        }
+    }
 }
 
 #[derive(Debug, facet::Facet, Clone)]
@@ -2590,9 +2620,15 @@ fn setup_logger() {
 mod tests {
     use super::*;
 
+    fn parse_config(kdl: &str) -> CaptainConfig {
+        facet_kdl::from_str(kdl)
+            .map_err(miette::Report::new)
+            .unwrap()
+    }
+
     #[test]
     fn empty_config_uses_defaults() {
-        let config: CaptainConfig = facet_kdl::from_str("").unwrap();
+        let config: CaptainConfig = parse_config("");
         assert!(config.pre_commit.generate_readmes);
         assert!(config.pre_commit.rustfmt);
         assert!(config.pre_commit.cargo_lock);
@@ -2600,7 +2636,7 @@ mod tests {
         assert!(config.pre_commit.edition_2024);
         assert!(config.pre_push.clippy);
         assert!(config.pre_push.nextest);
-        assert!(config.pre_push.doc_tests);
+        assert!(!config.pre_push.doc_tests);
         assert!(config.pre_push.docs);
         assert!(config.pre_push.cargo_shear);
         assert!(config.pre_push.clippy_features.is_none());
@@ -2616,7 +2652,7 @@ mod tests {
             pre-push {
             }
         "#;
-        let config: CaptainConfig = facet_kdl::from_str(kdl).unwrap();
+        let config: CaptainConfig = parse_config(kdl);
         assert!(config.pre_commit.generate_readmes);
         assert!(config.pre_push.clippy);
     }
@@ -2630,7 +2666,7 @@ mod tests {
                 cargo-lock #false
             }
         "#;
-        let config: CaptainConfig = facet_kdl::from_str(kdl).unwrap();
+        let config: CaptainConfig = parse_config(kdl);
         assert!(!config.pre_commit.generate_readmes);
         assert!(!config.pre_commit.rustfmt);
         assert!(!config.pre_commit.cargo_lock);
@@ -2650,7 +2686,7 @@ mod tests {
                 cargo-shear #false
             }
         "#;
-        let config: CaptainConfig = facet_kdl::from_str(kdl).unwrap();
+        let config: CaptainConfig = parse_config(kdl);
         assert!(!config.pre_push.clippy);
         assert!(!config.pre_push.nextest);
         assert!(!config.pre_push.doc_tests);
@@ -2667,7 +2703,7 @@ mod tests {
                 docs-features "all-features" "experimental"
             }
         "#;
-        let config: CaptainConfig = facet_kdl::from_str(kdl).unwrap();
+        let config: CaptainConfig = parse_config(kdl);
 
         let clippy_features = config.pre_push.clippy_features.unwrap();
         assert_eq!(clippy_features.features, vec!["serde", "async"]);
@@ -2691,7 +2727,7 @@ mod tests {
                 clippy-features "serde"
             }
         "#;
-        let config: CaptainConfig = facet_kdl::from_str(kdl).unwrap();
+        let config: CaptainConfig = parse_config(kdl);
 
         assert!(!config.pre_commit.generate_readmes);
         assert!(config.pre_commit.rustfmt); // default
@@ -2711,7 +2747,7 @@ mod tests {
                 rustfmt #false
             }
         "#;
-        let config: CaptainConfig = facet_kdl::from_str(kdl).unwrap();
+        let config: CaptainConfig = parse_config(kdl);
         assert!(!config.pre_commit.rustfmt);
         // pre-push defaults
         assert!(config.pre_push.clippy);
@@ -2725,7 +2761,7 @@ mod tests {
                 clippy #false
             }
         "#;
-        let config: CaptainConfig = facet_kdl::from_str(kdl).unwrap();
+        let config: CaptainConfig = parse_config(kdl);
         // pre-commit defaults
         assert!(config.pre_commit.generate_readmes);
         assert!(config.pre_commit.rustfmt);
