@@ -320,41 +320,41 @@ struct CaptainConfig {
 #[derive(Debug, facet::Facet)]
 #[facet(default, rename_all = "kebab-case")]
 struct PreCommitConfig {
-    #[facet(kdl::property, default = true)]
+    #[facet(kdl::child, default = true)]
     generate_readmes: bool,
-    #[facet(kdl::property, default = true)]
+    #[facet(kdl::child, default = true)]
     rustfmt: bool,
-    #[facet(kdl::property, default = true)]
+    #[facet(kdl::child, default = true)]
     cargo_lock: bool,
-    #[facet(kdl::property, default = true)]
+    #[facet(kdl::child, default = true)]
     arborium: bool,
-    #[facet(kdl::property, default = true)]
+    #[facet(kdl::child, default = true)]
     rust_version: bool,
-    #[facet(kdl::property, default = true)]
+    #[facet(kdl::child, default = true)]
     edition_2024: bool,
 }
 
 #[derive(Debug, facet::Facet)]
 #[facet(default, rename_all = "kebab-case")]
 struct PrePushConfig {
-    #[facet(kdl::property, default = true)]
+    #[facet(kdl::child, default = true)]
     clippy: bool,
     /// Features to use for clippy. If None, uses --all-features.
     #[facet(kdl::child, default)]
     clippy_features: Option<FeatureList>,
-    #[facet(kdl::property, default = true)]
+    #[facet(kdl::child, default = true)]
     nextest: bool,
-    #[facet(kdl::property, default = true)]
+    #[facet(kdl::child, default = true)]
     doc_tests: bool,
     /// Features to use for doc tests. If None, uses --all-features.
     #[facet(kdl::child, default)]
     doc_test_features: Option<FeatureList>,
-    #[facet(kdl::property, default = true)]
+    #[facet(kdl::child, default = true)]
     docs: bool,
     /// Features to use for docs. If None, uses --all-features.
     #[facet(kdl::child, default)]
     docs_features: Option<FeatureList>,
-    #[facet(kdl::property, default = true)]
+    #[facet(kdl::child, default = true)]
     cargo_shear: bool,
 }
 
