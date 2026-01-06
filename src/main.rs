@@ -292,7 +292,7 @@ struct CaptainConfig {
 }
 
 #[derive(Debug, facet::Facet)]
-#[facet(rename_all = "kebab-case", traits(Default))]
+#[facet(rename_all = "kebab-case", traits(Default), derive(Default))]
 struct PreCommitConfig {
     #[facet(kdl::child, default = true)]
     generate_readmes: bool,
@@ -306,21 +306,8 @@ struct PreCommitConfig {
     edition_2024: bool,
 }
 
-// Manual Default impl until https://github.com/facet-rs/facet/issues/1680 is fixed
-impl Default for PreCommitConfig {
-    fn default() -> Self {
-        Self {
-            generate_readmes: true,
-            rustfmt: true,
-            cargo_lock: true,
-            arborium: true,
-            edition_2024: true,
-        }
-    }
-}
-
 #[derive(Debug, facet::Facet)]
-#[facet(rename_all = "kebab-case", traits(Default))]
+#[facet(rename_all = "kebab-case", traits(Default), derive(Default))]
 struct PrePushConfig {
     #[facet(kdl::child, default = true)]
     clippy: bool,
@@ -341,22 +328,6 @@ struct PrePushConfig {
     docs_features: Option<FeatureList>,
     #[facet(kdl::child, default = true)]
     cargo_shear: bool,
-}
-
-// Manual Default impl until https://github.com/facet-rs/facet/issues/1680 is fixed
-impl Default for PrePushConfig {
-    fn default() -> Self {
-        Self {
-            clippy: true,
-            clippy_features: None,
-            nextest: true,
-            doc_tests: false,
-            doc_test_features: None,
-            docs: true,
-            docs_features: None,
-            cargo_shear: true,
-        }
-    }
 }
 
 #[derive(Debug, facet::Facet, Clone)]
