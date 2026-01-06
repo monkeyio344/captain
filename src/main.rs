@@ -233,16 +233,8 @@ fn ensure_rust_version(document: &mut DocumentMut) -> bool {
 }
 
 /// Check that all workspace crates use edition 2024. Bails with an error if not.
-fn check_edition_2024() {
+fn check_edition_2024(metadata: &cargo_metadata::Metadata) {
     use std::collections::HashSet;
-
-    let metadata = match cargo_metadata::MetadataCommand::new().exec() {
-        Ok(m) => m,
-        Err(e) => {
-            debug!("Failed to load workspace metadata for edition check: {}", e);
-            return;
-        }
-    };
 
     let mut errors: Vec<String> = Vec::new();
 
@@ -353,7 +345,7 @@ struct PrePushConfig {
     cargo_shear: bool,
 }
 
-#[derive(Debug, facet::Facet)]
+#[derive(Debug, facet::Facet, Clone)]
 struct FeatureList {
     #[facet(kdl::arguments)]
     features: Vec<String>,
@@ -401,6 +393,7 @@ fn enqueue_readme_jobs(
     sender: std::sync::mpsc::Sender<Job>,
     template_dir: Option<&Path>,
     staged_files: &StagedFiles,
+    metadata: &cargo_metadata::Metadata,
 ) {
     let workspace_dir = std::env::current_dir().unwrap();
     let entries = match fs_err::read_dir(&workspace_dir) {
@@ -596,13 +589,14 @@ fn enqueue_readme_jobs(
     let workspace_template_path = workspace_dir.join(template_name);
 
     // Get workspace name from cargo metadata so we can use the declared default member
-    let workspace_name = match workspace_name_from_metadata(&workspace_dir) {
+    let workspace_name = match workspace_name_from_metadata_object(metadata) {
         Ok(name) => name,
         Err(err) => {
+            // Fallback to directory name if metadata parsing fails
             let fallback = workspace_dir
                 .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("captain")
+                .and_then(|n| n.to_str())
+                .unwrap_or("workspace")
                 .to_string();
             warn!(
                 "Failed to determine workspace name via cargo metadata: {err}, falling back to '{fallback}'"
@@ -614,62 +608,40 @@ fn enqueue_readme_jobs(
     process_readme_template(&workspace_template_path, &workspace_dir, &workspace_name);
 }
 
-fn workspace_name_from_metadata(workspace_dir: &Path) -> Result<String, String> {
-    let manifest_path = workspace_dir.join("Cargo.toml");
-    if !manifest_path.exists() {
-        return Err("Workspace manifest Cargo.toml not found".to_string());
-    }
+/// Get the workspace name from cargo metadata (the root package name or first default member)
+fn workspace_name_from_metadata_object(
+    metadata: &cargo_metadata::Metadata,
+) -> Result<String, String> {
+    // Convert metadata to JSON for easier traversal
+    let metadata_json =
+        serde_json::to_value(metadata).map_err(|e| format!("Failed to serialize metadata: {e}"))?;
 
-    let output = command_with_color("cargo")
-        .arg("metadata")
-        .arg("--format-version")
-        .arg("1")
-        .arg("--no-deps")
-        .arg("--manifest-path")
-        .arg(&manifest_path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| format!("Failed to run cargo metadata: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "cargo metadata exited with {}: {}",
-            output.status,
-            stderr.trim()
-        ));
-    }
-
-    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|e| format!("Failed to parse cargo metadata output: {e}"))?;
-
-    if let Some(root_id) = metadata
+    if let Some(root_id) = metadata_json
         .get("resolve")
         .and_then(|resolve| resolve.get("root"))
         .and_then(|root| root.as_str())
-        && let Some(name) = package_name_by_id(&metadata, root_id)
+        && let Some(name) = package_name_by_id(&metadata_json, root_id)
     {
         return Ok(name.to_string());
     }
 
-    if let Some(default_members) = metadata
+    if let Some(default_members) = metadata_json
         .get("workspace_default_members")
         .and_then(|members| members.as_array())
     {
         for member in default_members {
             if let Some(member_id) = member.as_str()
-                && let Some(name) = package_name_by_id(&metadata, member_id)
+                && let Some(name) = package_name_by_id(&metadata_json, member_id)
             {
                 return Ok(name.to_string());
             }
         }
     }
 
-    let canonical_manifest = fs::canonicalize(&manifest_path)
+    let canonical_manifest = fs::canonicalize(metadata.workspace_root.join("Cargo.toml"))
         .map_err(|e| format!("Failed to canonicalize workspace manifest: {e}"))?;
 
-    if let Some(packages) = metadata
+    if let Some(packages) = metadata_json
         .get("packages")
         .and_then(|packages| packages.as_array())
     {
@@ -866,22 +838,11 @@ fn enqueue_cargo_lock_jobs(sender: std::sync::mpsc::Sender<Job>) {
     }
 }
 
-fn enqueue_arborium_jobs_sync() -> Vec<Job> {
+fn enqueue_arborium_jobs(
+    sender: std::sync::mpsc::Sender<Job>,
+    metadata: &cargo_metadata::Metadata,
+) {
     use std::collections::HashSet;
-
-    let mut jobs = Vec::new();
-
-    // Load workspace metadata to get all publishable crates
-    let metadata = match cargo_metadata::MetadataCommand::new().exec() {
-        Ok(m) => m,
-        Err(e) => {
-            debug!(
-                "Failed to load workspace metadata for arborium setup: {}",
-                e
-            );
-            return jobs;
-        }
-    };
 
     // Get workspace members
     let workspace_member_ids: HashSet<_> = metadata
@@ -922,7 +883,7 @@ fn enqueue_arborium_jobs_sync() -> Vec<Job> {
                     #[cfg(unix)]
                     executable: false,
                 };
-                jobs.push(job);
+                let _ = sender.send(job);
             }
 
             // Also update Cargo.toml to add docsrs metadata if not present
@@ -930,30 +891,17 @@ fn enqueue_arborium_jobs_sync() -> Vec<Job> {
             if cargo_toml_path.exists()
                 && let Some(job) = rewrite_cargo_toml(&cargo_toml_path, ensure_docsrs_metadata)
             {
-                jobs.push(job);
+                let _ = sender.send(job);
             }
         }
     }
-
-    jobs
 }
 
-fn enforce_rust_version_sync() -> Vec<Job> {
+fn enqueue_rust_version_jobs(
+    sender: std::sync::mpsc::Sender<Job>,
+    metadata: &cargo_metadata::Metadata,
+) {
     use std::collections::HashSet;
-
-    let mut jobs = Vec::new();
-
-    // Load workspace metadata to get all publishable crates
-    let metadata = match cargo_metadata::MetadataCommand::new().exec() {
-        Ok(m) => m,
-        Err(e) => {
-            debug!(
-                "Failed to load workspace metadata for rust-version check: {}",
-                e
-            );
-            return jobs;
-        }
-    };
 
     // Get workspace members
     let workspace_member_ids: HashSet<_> = metadata
@@ -962,29 +910,17 @@ fn enforce_rust_version_sync() -> Vec<Job> {
         .map(|id| &id.repr)
         .collect();
 
-    // Check each workspace crate for rust-version
+    // Iterate through workspace packages and ensure they have rust-version set
     for package in &metadata.packages {
-        // Only process workspace members
         if !workspace_member_ids.contains(&package.id.repr) {
             continue;
         }
 
-        // Skip non-library crates that we don't need to track
-        if package.name.contains("test") || package.name.contains("example") {
-            continue;
-        }
-
-        if let Some(manifest_dir) = package.manifest_path.parent() {
-            let cargo_toml_path: PathBuf = manifest_dir.into();
-            if cargo_toml_path.exists()
-                && let Some(job) = rewrite_cargo_toml(&cargo_toml_path, ensure_rust_version)
-            {
-                jobs.push(job);
-            }
+        let manifest_path = &package.manifest_path;
+        if let Some(job) = rewrite_cargo_toml(manifest_path.as_std_path(), ensure_rust_version) {
+            let _ = sender.send(job);
         }
     }
-
-    jobs
 }
 
 fn shell_escape(part: &str) -> String {
@@ -1616,7 +1552,28 @@ fn run_pre_push() {
         }
     }
 
-    // 2. Build nextest tests
+    // 2. Spawn cargo-shear in background (completely independent)
+    let shear_handle: Option<std::thread::JoinHandle<CommandResult>> =
+        if config.pre_push.cargo_shear {
+            let handle = std::thread::spawn(move || {
+                let start = std::time::Instant::now();
+                let shear_command = vec!["cargo".to_string(), "shear".to_string()];
+                let mut cmd = command_with_color(&shear_command[0]);
+                for arg in &shear_command[1..] {
+                    cmd.arg(arg);
+                }
+                cmd.stdout(Stdio::piped());
+                cmd.stderr(Stdio::piped());
+                let output = cmd.output();
+                let elapsed = start.elapsed();
+                (shear_command, output, elapsed)
+            });
+            Some(handle)
+        } else {
+            None
+        };
+
+    // 3. Build nextest tests
     let test_handle: Option<std::thread::JoinHandle<CommandResult>> = if config.pre_push.nextest {
         let build_spinner = build_spinner.as_ref().unwrap();
         let start = std::time::Instant::now();
@@ -1648,7 +1605,7 @@ fn run_pre_push() {
             }
         }
 
-        // 3. Spawn test runner in background
+        // Spawn test runner in background
         let mut run_command = vec![
             "cargo".to_string(),
             "nextest".to_string(),
@@ -1677,122 +1634,91 @@ fn run_pre_push() {
         None
     };
 
-    // 3. Spawn cargo-shear in background (doesn't need cargo lock)
-    let shear_handle: Option<std::thread::JoinHandle<CommandResult>> =
-        if config.pre_push.cargo_shear {
+    // 4. Spawn doc tests in background (independent of other tasks)
+    let doctest_handle: Option<std::thread::JoinHandle<CommandResult>> =
+        if doctest_spinner.is_some() {
+            let affected_crates_clone = affected_crates.clone();
+            let doc_test_features = config.pre_push.doc_test_features.clone();
             let handle = std::thread::spawn(move || {
                 let start = std::time::Instant::now();
-                let shear_command = vec!["cargo".to_string(), "shear".to_string()];
-                let mut cmd = command_with_color(&shear_command[0]);
-                for arg in &shear_command[1..] {
+                let mut doctest_command =
+                    vec!["cargo".to_string(), "test".to_string(), "--doc".to_string()];
+                for crate_name in &affected_crates_clone {
+                    doctest_command.push("-p".to_string());
+                    doctest_command.push(crate_name.to_string());
+                }
+                // Use configured features, or --all-features if not specified
+                match &doc_test_features {
+                    None => {
+                        doctest_command.push("--all-features".to_string());
+                    }
+                    Some(features) if !features.features.is_empty() => {
+                        doctest_command.push("--features".to_string());
+                        doctest_command.push(features.features.join(","));
+                    }
+                    Some(_) => {
+                        // Empty features list means no extra features
+                    }
+                }
+
+                let mut cmd = command_with_color(&doctest_command[0]);
+                for arg in &doctest_command[1..] {
                     cmd.arg(arg);
                 }
                 cmd.stdout(Stdio::piped());
                 cmd.stderr(Stdio::piped());
                 let output = cmd.output();
                 let elapsed = start.elapsed();
-                (shear_command, output, elapsed)
+                (doctest_command, output, elapsed)
             });
             Some(handle)
         } else {
             None
         };
 
-    // 4. Run doc tests (while tests run in background)
-    if let Some(ref spinner) = doctest_spinner {
-        let start = std::time::Instant::now();
-        let mut doctest_command =
-            vec!["cargo".to_string(), "test".to_string(), "--doc".to_string()];
-        for crate_name in &affected_crates {
-            doctest_command.push("-p".to_string());
-            doctest_command.push(crate_name.to_string());
-        }
-        // Use configured features, or --all-features if not specified
-        match &config.pre_push.doc_test_features {
-            None => {
-                doctest_command.push("--all-features".to_string());
+    // 5. Spawn docs build in background (independent of other tasks)
+    let docs_handle: Option<std::thread::JoinHandle<CommandResult>> = if docs_spinner.is_some() {
+        let affected_crates_clone = affected_crates.clone();
+        let docs_features = config.pre_push.docs_features.clone();
+        let handle = std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            let mut doc_command = vec![
+                "cargo".to_string(),
+                "doc".to_string(),
+                "--no-deps".to_string(),
+            ];
+            for crate_name in &affected_crates_clone {
+                doc_command.push("-p".to_string());
+                doc_command.push(crate_name.to_string());
             }
-            Some(features) if !features.features.is_empty() => {
-                doctest_command.push("--features".to_string());
-                doctest_command.push(features.features.join(","));
+            // Use configured features, or --all-features if not specified
+            match &docs_features {
+                None => {
+                    doc_command.push("--all-features".to_string());
+                }
+                Some(features) if !features.features.is_empty() => {
+                    doc_command.push("--features".to_string());
+                    doc_command.push(features.features.join(","));
+                }
+                Some(_) => {
+                    // Empty features list means no extra features
+                }
             }
-            Some(_) => {
-                // Empty features list means no extra features
+            let mut doc_cmd = command_with_color(&doc_command[0]);
+            for arg in &doc_command[1..] {
+                doc_cmd.arg(arg);
             }
-        }
-
-        let doctest_output = run_command_with_spinner(&doctest_command, &[], spinner);
-        let elapsed = start.elapsed();
-
-        match doctest_output {
-            Ok(output) if output.status.success() => {
-                spinner.succeed(elapsed.as_secs_f32());
-            }
-            Ok(output) if should_skip_doc_tests(&output) => {
-                // No lib to test - just hide this task
-                spinner.clear();
-            }
-            Ok(output) => {
-                spinner.fail(elapsed.as_secs_f32());
-                exit_with_command_failure(&doctest_command, &[], output, None);
-            }
-            Err(e) => {
-                spinner.fail(elapsed.as_secs_f32());
-                exit_with_command_error(&doctest_command, &[], e, None);
-            }
-        }
-    }
-
-    // 5. Build docs (while tests run in background)
-    if let Some(ref spinner) = docs_spinner {
-        let start = std::time::Instant::now();
-        let mut doc_command = vec![
-            "cargo".to_string(),
-            "doc".to_string(),
-            "--no-deps".to_string(),
-        ];
-        for crate_name in &affected_crates {
-            doc_command.push("-p".to_string());
-            doc_command.push(crate_name.to_string());
-        }
-        // Use configured features, or --all-features if not specified
-        match &config.pre_push.docs_features {
-            None => {
-                doc_command.push("--all-features".to_string());
-            }
-            Some(features) if !features.features.is_empty() => {
-                doc_command.push("--features".to_string());
-                doc_command.push(features.features.join(","));
-            }
-            Some(_) => {
-                // Empty features list means no extra features
-            }
-        }
-        let doc_env = [("RUSTDOCFLAGS", "-D warnings")];
-        let mut doc_cmd = command_with_color(&doc_command[0]);
-        for arg in &doc_command[1..] {
-            doc_cmd.arg(arg);
-        }
-        for (key, value) in &doc_env {
-            doc_cmd.env(key, value);
-        }
-        let doc_output = doc_cmd.output();
-        let elapsed = start.elapsed();
-
-        match doc_output {
-            Ok(output) if output.status.success() => {
-                spinner.succeed(elapsed.as_secs_f32());
-            }
-            Ok(output) => {
-                spinner.fail(elapsed.as_secs_f32());
-                exit_with_command_failure(&doc_command, &doc_env, output, None);
-            }
-            Err(e) => {
-                spinner.fail(elapsed.as_secs_f32());
-                exit_with_command_error(&doc_command, &doc_env, e, None);
-            }
-        }
-    }
+            doc_cmd.env("RUSTDOCFLAGS", "-D warnings");
+            doc_cmd.stdout(Stdio::piped());
+            doc_cmd.stderr(Stdio::piped());
+            let output = doc_cmd.output();
+            let elapsed = start.elapsed();
+            (doc_command, output, elapsed)
+        });
+        Some(handle)
+    } else {
+        None
+    };
 
     // 6. Wait for cargo-shear background task
     if let Some(handle) = shear_handle {
@@ -1828,7 +1754,65 @@ fn run_pre_push() {
         }
     }
 
-    // 7. Wait for background test results
+    // 7. Wait for doc tests
+    if let Some(handle) = doctest_handle {
+        let spinner = doctest_spinner.as_ref().unwrap();
+
+        match handle.join() {
+            Ok((doctest_command, output_result, elapsed)) => match output_result {
+                Ok(output) if output.status.success() => {
+                    spinner.succeed(elapsed.as_secs_f32());
+                }
+                Ok(output) if should_skip_doc_tests(&output) => {
+                    // No lib to test - just hide this task
+                    spinner.clear();
+                }
+                Ok(output) => {
+                    spinner.fail(elapsed.as_secs_f32());
+                    exit_with_command_failure(&doctest_command, &[], output, None);
+                }
+                Err(e) => {
+                    spinner.fail(elapsed.as_secs_f32());
+                    exit_with_command_error(&doctest_command, &[], e, None);
+                }
+            },
+            Err(_) => {
+                spinner.fail(0.0);
+                error!("doc tests thread panicked");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // 8. Wait for docs build
+    if let Some(handle) = docs_handle {
+        let spinner = docs_spinner.as_ref().unwrap();
+
+        match handle.join() {
+            Ok((doc_command, output_result, elapsed)) => match output_result {
+                Ok(output) if output.status.success() => {
+                    spinner.succeed(elapsed.as_secs_f32());
+                }
+                Ok(output) => {
+                    spinner.fail(elapsed.as_secs_f32());
+                    let doc_env = [("RUSTDOCFLAGS", "-D warnings")];
+                    exit_with_command_failure(&doc_command, &doc_env, output, None);
+                }
+                Err(e) => {
+                    spinner.fail(elapsed.as_secs_f32());
+                    let doc_env = [("RUSTDOCFLAGS", "-D warnings")];
+                    exit_with_command_error(&doc_command, &doc_env, e, None);
+                }
+            },
+            Err(_) => {
+                spinner.fail(0.0);
+                error!("docs build thread panicked");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // 9. Wait for test results
     if let Some(handle) = test_handle {
         let spinner = test_spinner.as_ref().unwrap();
 
@@ -2245,13 +2229,21 @@ pre-push {
     if !readme_in_path.exists() {
         if prompt_yes_no("Create README.md.in template?", true) {
             // Try to get the package/workspace name
-            let name = workspace_name_from_metadata(&workspace_dir).unwrap_or_else(|_| {
+            let name = if let Ok(metadata) = cargo_metadata::MetadataCommand::new().exec() {
+                workspace_name_from_metadata_object(&metadata).unwrap_or_else(|_| {
+                    workspace_dir
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("my-project")
+                        .to_string()
+                })
+            } else {
                 workspace_dir
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("my-project")
                     .to_string()
-            });
+            };
 
             let readme_content = format!(
                 r#"# {name}
@@ -2409,28 +2401,58 @@ fn main() {
     // Load captain config
     let config = load_captain_config();
 
+    // Create progress tracker with spinners
+    let progress = TaskProgress::new();
+    let start_time = std::time::Instant::now();
+
+    // Load cargo metadata once (used by multiple operations)
+    let metadata_spinner = progress.add_task("metadata");
+    let metadata_start = std::time::Instant::now();
+    let metadata = match cargo_metadata::MetadataCommand::new().exec() {
+        Ok(m) => {
+            metadata_spinner.succeed(metadata_start.elapsed().as_secs_f32());
+            m
+        }
+        Err(e) => {
+            metadata_spinner.fail(metadata_start.elapsed().as_secs_f32());
+            debug!("Failed to load workspace metadata: {}", e);
+            std::process::exit(1);
+        }
+    };
+
     // Check edition 2024 requirement (bails if not met)
     if config.pre_commit.edition_2024 {
-        check_edition_2024();
+        check_edition_2024(&metadata);
     }
 
     // Use a channel to collect jobs from all tasks.
     let (tx_job, rx_job) = mpsc::channel();
 
     let mut handles = vec![];
+    let mut spinners = vec![];
 
     if config.pre_commit.generate_readmes {
+        let spinner = progress.add_task("readmes");
+        spinners.push(("readmes", spinner, std::time::Instant::now()));
         handles.push(std::thread::spawn({
             let sender = tx_job.clone();
             let template_dir = template_dir.clone();
             let staged_files_clone = staged_files.clone();
+            let metadata_clone = metadata.clone();
             move || {
-                enqueue_readme_jobs(sender, template_dir.as_deref(), &staged_files_clone);
+                enqueue_readme_jobs(
+                    sender,
+                    template_dir.as_deref(),
+                    &staged_files_clone,
+                    &metadata_clone,
+                );
             }
         }));
     }
 
     if config.pre_commit.rustfmt {
+        let spinner = progress.add_task("rustfmt");
+        spinners.push(("rustfmt", spinner, std::time::Instant::now()));
         handles.push(std::thread::spawn({
             let sender = tx_job.clone();
             move || {
@@ -2440,6 +2462,8 @@ fn main() {
     }
 
     if config.pre_commit.cargo_lock {
+        let spinner = progress.add_task("cargo-lock");
+        spinners.push(("cargo-lock", spinner, std::time::Instant::now()));
         handles.push(std::thread::spawn({
             let sender = tx_job.clone();
             move || {
@@ -2448,33 +2472,56 @@ fn main() {
         }));
     }
 
-    drop(tx_job);
+    if config.pre_commit.arborium {
+        let spinner = progress.add_task("arborium");
+        spinners.push(("arborium", spinner, std::time::Instant::now()));
+        handles.push(std::thread::spawn({
+            let sender = tx_job.clone();
+            let metadata_clone = metadata.clone();
+            move || {
+                enqueue_arborium_jobs(sender, &metadata_clone);
+            }
+        }));
+    }
 
-    // Arborium setup and rust-version enforcement run synchronously before job processing to avoid concurrent TOML edits
-    let mut arborium_jobs = if config.pre_commit.arborium {
-        enqueue_arborium_jobs_sync()
-    } else {
-        Vec::new()
-    };
-    let mut rust_version_jobs = if config.pre_commit.rust_version {
-        enforce_rust_version_sync()
-    } else {
-        Vec::new()
-    };
+    if config.pre_commit.rust_version {
+        let spinner = progress.add_task("rust-version");
+        spinners.push(("rust-version", spinner, std::time::Instant::now()));
+        handles.push(std::thread::spawn({
+            let sender = tx_job.clone();
+            let metadata_clone = metadata.clone();
+            move || {
+                enqueue_rust_version_jobs(sender, &metadata_clone);
+            }
+        }));
+    }
+
+    drop(tx_job);
 
     let mut jobs: Vec<Job> = Vec::new();
     for job in rx_job {
         jobs.push(job);
     }
-    jobs.append(&mut arborium_jobs);
-    jobs.append(&mut rust_version_jobs);
 
     for handle in handles.drain(..) {
         handle.join().unwrap();
     }
 
+    // Mark all async spinners as complete
+    for (_name, spinner, task_start) in spinners {
+        spinner.succeed(task_start.elapsed().as_secs_f32());
+    }
+
     jobs.retain(|job| !job.is_noop());
     jobs.retain(|job| !is_gitignored(&job.path));
+
+    let total_elapsed = start_time.elapsed().as_secs_f32();
+    println!(
+        "\n  {} Pre-commit checks completed in {:.1}s\n",
+        "✓".green(),
+        total_elapsed
+    );
+
     show_and_apply_jobs(&mut jobs);
 }
 
