@@ -1,4 +1,3 @@
-use facet_kdl as kdl;
 use log::{Level, LevelFilter, Log, Metadata, Record, debug, error, warn};
 use owo_colors::{OwoColorize, Style};
 #[cfg(unix)]
@@ -279,96 +278,117 @@ fn check_edition_2024(metadata: &cargo_metadata::Metadata) {
     }
 }
 
-/// Configuration read from `.config/captain/config.kdl`
+/// Configuration read from `.config/captain/config.yaml`
 #[derive(Debug, facet::Facet)]
 #[facet(derive(Default), traits(Default))]
 #[facet(rename_all = "kebab-case")]
 struct CaptainConfig {
-    #[facet(kdl::child, default)]
+    #[facet(default)]
     pre_commit: PreCommitConfig,
 
-    #[facet(kdl::child, default)]
+    #[facet(default)]
     pre_push: PrePushConfig,
 }
 
 #[derive(Debug, facet::Facet)]
 #[facet(rename_all = "kebab-case", traits(Default), derive(Default))]
 struct PreCommitConfig {
-    #[facet(kdl::child, default = true)]
+    #[facet(default = true)]
     generate_readmes: bool,
-    #[facet(kdl::child, default = true)]
+    #[facet(default = true)]
     rustfmt: bool,
-    #[facet(kdl::child, default = true)]
+    #[facet(default = true)]
     cargo_lock: bool,
-    #[facet(kdl::child, default = true)]
+    #[facet(default = true)]
     arborium: bool,
-    #[facet(kdl::child, default = true)]
+    #[facet(default = true)]
     edition_2024: bool,
 }
 
 #[derive(Debug, facet::Facet)]
 #[facet(rename_all = "kebab-case", traits(Default), derive(Default))]
 struct PrePushConfig {
-    #[facet(kdl::child, default = true)]
+    #[facet(default = true)]
     clippy: bool,
     /// Features to use for clippy. If None, uses --all-features.
-    #[facet(kdl::child, default)]
-    clippy_features: Option<FeatureList>,
-    #[facet(kdl::child, default = true)]
+    #[facet(default)]
+    clippy_features: Option<Vec<String>>,
+    #[facet(default = true)]
     nextest: bool,
-    #[facet(kdl::child, default = false)]
+    #[facet(default = false)]
     doc_tests: bool,
     /// Features to use for doc tests. If None, uses --all-features.
-    #[facet(kdl::child, default)]
-    doc_test_features: Option<FeatureList>,
-    #[facet(kdl::child, default = true)]
+    #[facet(default)]
+    doc_test_features: Option<Vec<String>>,
+    #[facet(default = true)]
     docs: bool,
     /// Features to use for docs. If None, uses --all-features.
-    #[facet(kdl::child, default)]
-    docs_features: Option<FeatureList>,
-    #[facet(kdl::child, default = true)]
+    #[facet(default)]
+    docs_features: Option<Vec<String>>,
+    #[facet(default = true)]
     cargo_shear: bool,
-}
-
-#[derive(Debug, facet::Facet, Clone)]
-struct FeatureList {
-    #[facet(kdl::arguments)]
-    features: Vec<String>,
 }
 
 fn get_config_path() -> PathBuf {
     std::env::current_dir()
         .unwrap()
-        .join(".config/captain/config.kdl")
+        .join(".config/captain/config.yaml")
 }
 
 fn load_captain_config() -> CaptainConfig {
     let config_path = get_config_path();
+    let captain_dir = std::env::current_dir().unwrap().join(".config/captain");
 
-    let content = if !config_path.exists() {
+    // Check for old KDL config and error out
+    let old_kdl_path = captain_dir.join("config.kdl");
+    if old_kdl_path.exists() {
+        error!(
+            "Found old KDL config file at {}\n\
+             Captain now uses YAML configuration.\n\
+             Please migrate your config.kdl to config.yaml and remove the .kdl file.\n\
+             See the README for the new YAML syntax.",
+            old_kdl_path.display()
+        );
+        std::process::exit(1);
+    }
+
+    // Check for config.yml (we standardize on .yaml)
+    let yml_path = captain_dir.join("config.yml");
+    if yml_path.exists() {
+        error!(
+            "Found config.yml at {}\n\
+             Captain uses config.yaml (not .yml).\n\
+             Please rename config.yml to config.yaml.",
+            yml_path.display()
+        );
+        std::process::exit(1);
+    }
+
+    if !config_path.exists() {
         debug!(
             "No config file at {}, using defaults",
             config_path.display()
         );
-        String::new()
-    } else {
-        match fs::read_to_string(&config_path) {
-            Ok(c) => c,
-            Err(e) => {
-                error!("Failed to read config file {}: {e}", config_path.display());
-                std::process::exit(1);
-            }
+        return CaptainConfig::default();
+    }
+
+    let content = match fs::read_to_string(&config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            error!("Failed to read config file {}: {e}", config_path.display());
+            std::process::exit(1);
         }
     };
 
-    match facet_kdl::from_str(&content) {
+    // Handle empty file as defaults
+    if content.trim().is_empty() {
+        return CaptainConfig::default();
+    }
+
+    match facet_yaml::from_str(&content) {
         Ok(config) => config,
         Err(e) => {
-            error!(
-                "Failed to parse {}:\n{:?}",
-                config_path.display(),
-                miette::Report::new(e)
-            );
+            error!("Failed to parse {}:\n{e}", config_path.display());
             std::process::exit(1);
         }
     }
@@ -1266,9 +1286,9 @@ fn run_pre_push() {
             None => {
                 clippy_command.push("--all-features".to_string());
             }
-            Some(features) if !features.features.is_empty() => {
+            Some(features) if !features.is_empty() => {
                 clippy_command.push("--features".to_string());
-                clippy_command.push(features.features.join(","));
+                clippy_command.push(features.join(","));
             }
             Some(_) => {
                 // Empty features list means no extra features
@@ -1618,9 +1638,9 @@ fn run_pre_push() {
                     None => {
                         doctest_command.push("--all-features".to_string());
                     }
-                    Some(features) if !features.features.is_empty() => {
+                    Some(features) if !features.is_empty() => {
                         doctest_command.push("--features".to_string());
-                        doctest_command.push(features.features.join(","));
+                        doctest_command.push(features.join(","));
                     }
                     Some(_) => {
                         // Empty features list means no extra features
@@ -1662,9 +1682,9 @@ fn run_pre_push() {
                 None => {
                     doc_command.push("--all-features".to_string());
                 }
-                Some(features) if !features.features.is_empty() => {
+                Some(features) if !features.is_empty() => {
                     doc_command.push("--features".to_string());
-                    doc_command.push(features.features.join(","));
+                    doc_command.push(features.join(","));
                 }
                 Some(_) => {
                     // Empty features list means no extra features
@@ -2140,48 +2160,49 @@ echo "All hooks installed successfully."
         println!("  {} Created conductor.json", "✔".green());
     }
 
-    // 3. Create .config/captain/ directory with config.kdl and templates
+    // 3. Create .config/captain/ directory with config.yaml and templates
     println!();
     let captain_dir = workspace_dir.join(".config/captain");
-    let config_path = captain_dir.join("config.kdl");
+    let config_path = captain_dir.join("config.yaml");
     let templates_dir = captain_dir.join("readme-templates");
 
     if !captain_dir.exists() {
         if prompt_yes_no(
-            "Create .config/captain/ with config.kdl and readme templates?",
+            "Create .config/captain/ with config.yaml and readme templates?",
             true,
         ) {
             fs::create_dir_all(&templates_dir).expect("Failed to create captain config directory");
 
-            // Create default config.kdl
-            let config_content = r#"// Captain configuration
-// All options default to #true. Use #false to disable.
-// See: https://kdl.dev for KDL syntax
+            // Create default config.yaml
+            let config_content = r#"# Captain configuration
+# All options default to true. Set to false to disable.
 
-pre-commit {
-    // generate-readmes #false
-    // rustfmt #false
-    // cargo-lock #false
-    // arborium #false
-    // edition-2024 #false
-}
+pre-commit:
+  # generate-readmes: false
+  # rustfmt: false
+  # cargo-lock: false
+  # arborium: false
+  # edition-2024: false
 
-pre-push {
-    // clippy #false
-    // nextest #false
-    // doc-tests #false
-    // docs #false
-    // cargo-shear #false
+pre-push:
+  # clippy: false
+  # nextest: false
+  # doc-tests: false
+  # docs: false
+  # cargo-shear: false
 
-    // Feature configuration (uncomment and customize as needed)
-    // clippy-features "feature1" "feature2"
-    // doc-test-features "feature1"
-    // docs-features "feature1"
-}
+  # Feature configuration (uncomment and customize as needed)
+  # clippy-features:
+  #   - feature1
+  #   - feature2
+  # doc-test-features:
+  #   - feature1
+  # docs-features:
+  #   - feature1
 "#;
-            fs::write(&config_path, config_content).expect("Failed to write config.kdl");
+            fs::write(&config_path, config_content).expect("Failed to write config.yaml");
             files_created.push(config_path);
-            println!("  {} Created .config/captain/config.kdl", "✔".green());
+            println!("  {} Created .config/captain/config.yaml", "✔".green());
 
             // Create empty header/footer templates
             let header_path = templates_dir.join("readme-header.md");
@@ -2591,15 +2612,14 @@ fn setup_logger() {
 mod tests {
     use super::*;
 
-    fn parse_config(kdl: &str) -> CaptainConfig {
-        facet_kdl::from_str(kdl)
-            .map_err(miette::Report::new)
-            .unwrap()
+    fn parse_config(yaml: &str) -> CaptainConfig {
+        facet_yaml::from_str(yaml).unwrap()
     }
 
     #[test]
     fn empty_config_uses_defaults() {
-        let config: CaptainConfig = parse_config("");
+        // Empty YAML document (just empty object)
+        let config: CaptainConfig = parse_config("{}");
         assert!(config.pre_commit.generate_readmes);
         assert!(config.pre_commit.rustfmt);
         assert!(config.pre_commit.cargo_lock);
@@ -2617,27 +2637,24 @@ mod tests {
 
     #[test]
     fn empty_blocks_use_defaults() {
-        let kdl = r#"
-            pre-commit {
-            }
-            pre-push {
-            }
-        "#;
-        let config: CaptainConfig = parse_config(kdl);
+        let yaml = r#"
+pre-commit: {}
+pre-push: {}
+"#;
+        let config: CaptainConfig = parse_config(yaml);
         assert!(config.pre_commit.generate_readmes);
         assert!(config.pre_push.clippy);
     }
 
     #[test]
     fn disable_pre_commit_options() {
-        let kdl = r#"
-            pre-commit {
-                generate-readmes #false
-                rustfmt #false
-                cargo-lock #false
-            }
-        "#;
-        let config: CaptainConfig = parse_config(kdl);
+        let yaml = r#"
+pre-commit:
+  generate-readmes: false
+  rustfmt: false
+  cargo-lock: false
+"#;
+        let config: CaptainConfig = parse_config(yaml);
         assert!(!config.pre_commit.generate_readmes);
         assert!(!config.pre_commit.rustfmt);
         assert!(!config.pre_commit.cargo_lock);
@@ -2648,16 +2665,15 @@ mod tests {
 
     #[test]
     fn disable_pre_push_options() {
-        let kdl = r#"
-            pre-push {
-                clippy #false
-                nextest #false
-                doc-tests #false
-                docs #false
-                cargo-shear #false
-            }
-        "#;
-        let config: CaptainConfig = parse_config(kdl);
+        let yaml = r#"
+pre-push:
+  clippy: false
+  nextest: false
+  doc-tests: false
+  docs: false
+  cargo-shear: false
+"#;
+        let config: CaptainConfig = parse_config(yaml);
         assert!(!config.pre_push.clippy);
         assert!(!config.pre_push.nextest);
         assert!(!config.pre_push.doc_tests);
@@ -2667,38 +2683,41 @@ mod tests {
 
     #[test]
     fn feature_lists() {
-        let kdl = r#"
-            pre-push {
-                clippy-features "serde" "async"
-                doc-test-features "full"
-                docs-features "all-features" "experimental"
-            }
-        "#;
-        let config: CaptainConfig = parse_config(kdl);
+        let yaml = r#"
+pre-push:
+  clippy-features:
+    - serde
+    - async
+  doc-test-features:
+    - full
+  docs-features:
+    - all-features
+    - experimental
+"#;
+        let config: CaptainConfig = parse_config(yaml);
 
         let clippy_features = config.pre_push.clippy_features.unwrap();
-        assert_eq!(clippy_features.features, vec!["serde", "async"]);
+        assert_eq!(clippy_features, vec!["serde", "async"]);
 
         let doc_test_features = config.pre_push.doc_test_features.unwrap();
-        assert_eq!(doc_test_features.features, vec!["full"]);
+        assert_eq!(doc_test_features, vec!["full"]);
 
         let docs_features = config.pre_push.docs_features.unwrap();
-        assert_eq!(docs_features.features, vec!["all-features", "experimental"]);
+        assert_eq!(docs_features, vec!["all-features", "experimental"]);
     }
 
     #[test]
     fn mixed_config() {
-        let kdl = r#"
-            pre-commit {
-                generate-readmes #false
-                arborium #false
-            }
-            pre-push {
-                nextest #false
-                clippy-features "serde"
-            }
-        "#;
-        let config: CaptainConfig = parse_config(kdl);
+        let yaml = r#"
+pre-commit:
+  generate-readmes: false
+  arborium: false
+pre-push:
+  nextest: false
+  clippy-features:
+    - serde
+"#;
+        let config: CaptainConfig = parse_config(yaml);
 
         assert!(!config.pre_commit.generate_readmes);
         assert!(config.pre_commit.rustfmt); // default
@@ -2708,17 +2727,16 @@ mod tests {
         assert!(!config.pre_push.nextest);
 
         let clippy_features = config.pre_push.clippy_features.unwrap();
-        assert_eq!(clippy_features.features, vec!["serde"]);
+        assert_eq!(clippy_features, vec!["serde"]);
     }
 
     #[test]
     fn only_pre_commit_block() {
-        let kdl = r#"
-            pre-commit {
-                rustfmt #false
-            }
-        "#;
-        let config: CaptainConfig = parse_config(kdl);
+        let yaml = r#"
+pre-commit:
+  rustfmt: false
+"#;
+        let config: CaptainConfig = parse_config(yaml);
         assert!(!config.pre_commit.rustfmt);
         // pre-push defaults
         assert!(config.pre_push.clippy);
@@ -2727,16 +2745,89 @@ mod tests {
 
     #[test]
     fn only_pre_push_block() {
-        let kdl = r#"
-            pre-push {
-                clippy #false
-            }
-        "#;
-        let config: CaptainConfig = parse_config(kdl);
+        let yaml = r#"
+pre-push:
+  clippy: false
+"#;
+        let config: CaptainConfig = parse_config(yaml);
         // pre-commit defaults
         assert!(config.pre_commit.generate_readmes);
         assert!(config.pre_commit.rustfmt);
         // pre-push override
         assert!(!config.pre_push.clippy);
+    }
+
+    #[test]
+    fn comment_only_blocks_use_defaults() {
+        // This is what users get when they have a config with only comments under a key
+        // YAML parses `pre-commit:` with only comments as null
+        let yaml = r#"
+# Captain configuration
+# All options default to true unless noted. Set to false to disable.
+
+pre-commit:
+  # generate-readmes: false
+  # rustfmt: false
+  # cargo-lock: false
+  # arborium: false
+  # edition-2024: false
+
+pre-push:
+  # clippy: false
+  # nextest: false
+  # doc-tests: false
+  # docs: false
+  # cargo-shear: false
+"#;
+        let config: CaptainConfig = parse_config(yaml);
+        // All defaults should apply
+        assert!(config.pre_commit.generate_readmes);
+        assert!(config.pre_commit.rustfmt);
+        assert!(config.pre_commit.cargo_lock);
+        assert!(config.pre_commit.arborium);
+        assert!(config.pre_commit.edition_2024);
+        assert!(config.pre_push.clippy);
+        assert!(config.pre_push.nextest);
+        assert!(!config.pre_push.doc_tests);
+        assert!(config.pre_push.docs);
+        assert!(config.pre_push.cargo_shear);
+    }
+
+    #[test]
+    fn top_level_comments_only() {
+        // File with only comments should use all defaults
+        let yaml = r#"
+# Captain configuration
+# This file is intentionally empty - all defaults apply
+"#;
+        let config: CaptainConfig = parse_config(yaml);
+        assert!(config.pre_commit.generate_readmes);
+        assert!(config.pre_push.clippy);
+    }
+
+    #[test]
+    fn mixed_comments_and_values() {
+        let yaml = r#"
+pre-commit:
+  # Keep rustfmt enabled (default)
+  generate-readmes: false
+  # cargo-lock: false
+
+pre-push:
+  clippy: false
+  # nextest stays enabled
+  clippy-features:
+    - serde
+    # - disabled-feature
+    - tokio
+"#;
+        let config: CaptainConfig = parse_config(yaml);
+        assert!(!config.pre_commit.generate_readmes);
+        assert!(config.pre_commit.rustfmt); // default
+        assert!(config.pre_commit.cargo_lock); // default (commented out)
+        assert!(!config.pre_push.clippy);
+        assert!(config.pre_push.nextest); // default
+        let features = config.pre_push.clippy_features.unwrap();
+        assert_eq!(features, vec!["serde", "tokio"]);
     }
 }
